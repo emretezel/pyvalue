@@ -14,6 +14,23 @@ two concepts per period (EBITDA's D&A, gross profit's COGS, interest
 coverage's interest expense), the companion row must exist for every window
 period on the same end date.
 
+**Cadence is per concept, not per filer.** The annual fallback below was
+written for filers with no quarterly statement at all, but a provider can
+report one concept quarterly and another only annually for the *same* listing —
+EODHD's financing block is a common case (SK Hynix `000660.KO` carries
+`dividendsPaid` in 37 of 61 quarters, none in Q1/Q2 since 2024, beside a
+complete quarterly income statement). Two consequences:
+
+- Where a ratio divides two flows and the numerator resolves through the
+  **annual** cadence, the denominator is pinned to the same fiscal year rather
+  than resolving a trailing window of its own. Dividing an FY total by a
+  quarterly window ending in a different month compares two different twelve-
+  month spans; on SK Hynix that reads 2.24% against a coherent 3.92%.
+- The annual fallback is opted into per metric, in the metrics layer only.
+  Normalization never synthesizes a missing quarterly row from `FY − Q3 − Q4`:
+  nothing in the data says how to split that residual across the missing
+  quarters, and `financial_facts` holds only as-filed provider values.
+
 **Sign guard (applies to every EBITDA, owner-earnings and interest-coverage
 metric below).** D&A is always a positive add-back and interest expense a
 positive denominator, but EODHD sometimes reports them negative — sign errors
@@ -169,7 +186,7 @@ Columns:
 | --- | --- | --- | --- |
 | Dividend Yield (TTM) | `dividend_yield_ttm` | Primary `abs(CommonStockDividendsPaid_TTM) / market_cap`; fallback `CommonStockDividendsPerShareCashPaid / latest price` when the cash-dividend path is unavailable. Annual-only filers resolve the cash-dividends leg from a single fresh FY row (480-day window) via the annual cadence. Evidenced non-payers measure 0: when both dividend reads miss, no fresh nonzero dividends-paid row exists, and the operating-cash-flow TTM window resolves (statements are current), the yield is 0 rather than NA — a fresh cash-flow statement without a dividends line is affirmative evidence of a zero payout. | Separates actual cash returned to owners from forward-looking provider yield fields; a non-payer has a yield of exactly 0, and the old NA silently voided `shareholder_yield_ttm` for every non-payer. |
 | Shareholder Yield (TTM) | `shareholder_yield_ttm` | `dividend_yield_ttm + net_buyback_yield`, emitted only when both inputs are available. Both legs opt into the annual cadence, so an annual-only filer with FY dividends and FY financing cash flow is measured. | Combines cash dividends and buybacks into one capital-allocation return measure. |
-| Dividend Payout Ratio (TTM) | `dividend_payout_ratio_ttm` | `abs(CommonStockDividendsPaid_TTM) / NetIncome_TTM`, only when `NetIncome_TTM > 0`. Evidenced non-payers measure 0: with positive TTM net income, no fresh nonzero dividends-paid row, and a resolving operating-cash-flow TTM window, the payout is 0 rather than NA (same zero-payout inference as `dividend_yield_ttm`). Loss periods stay NA — a payout ratio is undefined without positive earnings. | Flags whether the dividend is comfortably covered by trailing earnings; a profitable non-payer retains everything, which is a measured 0, not missing data. |
+| Dividend Payout Ratio (TTM) | `dividend_payout_ratio_ttm` | `abs(CommonStockDividendsPaid_TTM) / NetIncome_TTM`, only when `NetIncome_TTM > 0`. The **dividends leg resolves the window** — it is the scarce one, so it decides which twelve months the ratio describes — and net income is the companion. Where dividends survive only as an FY row, the window resolves through the annual cadence (480-day freshness) and net income is then pinned to that *same fiscal year* via an FY companion; no aligned FY net income means NA rather than a cross-cadence ratio. On the quarterly and semi-annual paths net income resolves its own window, unchanged. Evidenced non-payers measure 0: with positive TTM net income, no fresh nonzero dividends-paid row, and a resolving operating-cash-flow TTM window, the payout is 0 rather than NA (same zero-payout inference as `dividend_yield_ttm`). Loss periods stay NA — a payout ratio is undefined without positive earnings. | Flags whether the dividend is comfortably covered by trailing earnings; a profitable non-payer retains everything, which is a measured 0, not missing data. Annually-reported dividends (EODHD's financing block is often quarterly-incomplete) no longer void the metric — SK Hynix `000660.KO` measures 3.92% off its FY2025 pair. |
 
 ## Growth / Compounding
 

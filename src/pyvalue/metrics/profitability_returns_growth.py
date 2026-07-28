@@ -20,7 +20,7 @@ from pyvalue.metrics.owner_earnings_enterprise import (
     OwnerEarningsEnterpriseCalculator,
 )
 from pyvalue.metrics.share_count_change import SHARE_COUNT_CONCEPT
-from pyvalue.metrics.ttm import resolve_ttm_window
+from pyvalue.metrics.ttm import TTMWindow, paired_records, resolve_ttm_window
 from pyvalue.metrics.utils import (
     MAX_FACT_AGE_DAYS,
     MAX_FY_FACT_AGE_DAYS,
@@ -498,57 +498,138 @@ class ProfitabilityReturnsGrowthCalculator:
     def compute_dividend_payout_ratio_ttm(
         self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[_RatioSnapshot]:
-        # Net income resolves first: a payout ratio is undefined in a loss
-        # period no matter what was paid, so the NI guards must apply before
-        # any zero-payout inference for non-payers.
-        net_income = self._compute_ttm_amount(
-            listing_id,
-            repo,
-            NET_INCOME_COMMON_CONCEPTS + NET_INCOME_CONCEPTS,
-            context="dividend_payout_ratio_ttm",
+        context = "dividend_payout_ratio_ttm"
+
+        # The dividends leg resolves the window because it is the scarce one.
+        # EODHD's financing block is only intermittently populated -- SK Hynix
+        # (000660.KO) carries dividendsPaid in 37 of 61 quarters and none at
+        # all in Q1/Q2 since 2024, while every operating line is complete --
+        # so it is dividends, not net income, that decides which twelve months
+        # this ratio can describe. The annual opt-in lets a filer whose
+        # dividends survive only as an FY row still measure a payout, matching
+        # dividend_yield_ttm, which reads the same concept.
+        resolution = resolve_ttm_window(
+            repo.monetary_facts_for_concept(listing_id, DIVIDENDS_PAID_CONCEPT),
+            annual_max_age_days=MAX_FY_FACT_AGE_DAYS,
+        )
+        window = resolution.window
+        if window is None:
+            LOGGER.warning(
+                "%s: %s (concept=%s, listing_id=%s)",
+                context,
+                resolution.failure,
+                DIVIDENDS_PAID_CONCEPT,
+                listing_id,
+            )
+            return self._zero_payout_snapshot(listing_id, repo, context=context)
+
+        target_currency = require_metric_ticker_currency(
+            listing_id, repo, metric_id=context
+        )
+        dividends_paid = sum_money(
+            [
+                self._money(
+                    record,
+                    listing_id=listing_id,
+                    target_currency=target_currency,
+                    context=context,
+                    absolute=True,
+                )
+                for record in window.records
+            ]
+        )
+
+        net_income = self._net_income_for_dividend_window(
+            listing_id, repo, window=window, context=context
         )
         if net_income is None:
             LOGGER.warning(
-                "dividend_payout_ratio_ttm: missing TTM net income for listing_id=%s",
-                listing_id,
+                "%s: missing TTM net income for listing_id=%s", context, listing_id
             )
             return None
         if net_income.money.amount <= 0:
+            # A payout ratio is undefined without positive earnings, no matter
+            # what was actually paid out.
             LOGGER.warning(
-                "dividend_payout_ratio_ttm: non-positive TTM net income for"
-                " listing_id=%s",
-                listing_id,
-            )
-            return None
-
-        dividends_paid = self._compute_ttm_amount(
-            listing_id,
-            repo,
-            DIVIDENDS_PAID_CONCEPTS,
-            context="dividend_payout_ratio_ttm",
-            absolute=True,
-        )
-        if dividends_paid is None:
-            # An evidenced non-payer pays out none of its earnings: the payout
-            # of a positive TTM net income with zero dividends is exactly 0.
-            zero = self._zero_dividend_snapshot(
-                listing_id, repo, context="dividend_payout_ratio_ttm"
-            )
-            if zero is not None:
-                return _RatioSnapshot(
-                    value=0.0, as_of=max(net_income.as_of, zero.as_of)
-                )
-            LOGGER.warning(
-                "dividend_payout_ratio_ttm: missing TTM cash dividends for"
-                " listing_id=%s",
+                "%s: non-positive TTM net income for listing_id=%s",
+                context,
                 listing_id,
             )
             return None
 
         return _RatioSnapshot(
-            value=dividends_paid.money / net_income.money,
-            as_of=max(dividends_paid.as_of, net_income.as_of),
+            value=dividends_paid / net_income.money,
+            as_of=max(window.as_of, net_income.as_of),
         )
+
+    def _net_income_for_dividend_window(
+        self,
+        listing_id: int,
+        repo: RegionFactsRepository,
+        *,
+        window: TTMWindow[MonetaryFact],
+        context: str,
+    ) -> Optional[_MoneySnapshot]:
+        """Resolve the net-income denominator against the dividend window.
+
+        On the annual path the denominator is pinned to the *same* fiscal year
+        as the numerator: an FY dividend total over a quarterly trailing window
+        that ends in a different month compares two different twelve-month
+        spans. SK Hynix reads 2.24% that way against a coherent 3.92%.
+
+        On the quarterly and semi-annual paths net income keeps resolving its
+        own window, which is byte-for-byte the behaviour every listing that
+        computes today already gets. Aligning those is a real but separate
+        (and screener-visible) change.
+        """
+
+        concepts = NET_INCOME_COMMON_CONCEPTS + NET_INCOME_CONCEPTS
+        if window.cadence == "annual":
+            return self._compute_ttm_amount_on_window(
+                listing_id, repo, concepts, window=window, context=context
+            )
+        return self._compute_ttm_amount(listing_id, repo, concepts, context=context)
+
+    def _zero_payout_snapshot(
+        self, listing_id: int, repo: RegionFactsRepository, *, context: str
+    ) -> Optional[_RatioSnapshot]:
+        """Infer a payout of exactly 0 for an evidenced non-payer, else NA.
+
+        Reached only when no dividend window resolved. The zero needs no window
+        alignment -- zero earnings paid out is zero over any span -- but it
+        still needs positive trailing earnings to be a *ratio*. Net income is
+        therefore guarded *before* the inference runs, so a loss-making
+        non-payer stays NA without emitting a "zero payout inferred" line it
+        never earned.
+        """
+
+        net_income = self._compute_ttm_amount(
+            listing_id,
+            repo,
+            NET_INCOME_COMMON_CONCEPTS + NET_INCOME_CONCEPTS,
+            context=context,
+        )
+        if net_income is None:
+            LOGGER.warning(
+                "%s: missing TTM net income for listing_id=%s", context, listing_id
+            )
+            return None
+        if net_income.money.amount <= 0:
+            LOGGER.warning(
+                "%s: non-positive TTM net income for listing_id=%s",
+                context,
+                listing_id,
+            )
+            return None
+
+        zero = self._zero_dividend_snapshot(listing_id, repo, context=context)
+        if zero is None:
+            LOGGER.warning(
+                "%s: missing TTM cash dividends for listing_id=%s", context, listing_id
+            )
+            return None
+
+        return _RatioSnapshot(value=0.0, as_of=max(net_income.as_of, zero.as_of))
 
     def compute_revenue_cagr_10y(
         self, listing_id: int, repo: RegionFactsRepository
@@ -1138,6 +1219,61 @@ class ProfitabilityReturnsGrowthCalculator:
                     absolute=absolute,
                 )
                 for record in window.records
+            ]
+            return _MoneySnapshot(money=sum_money(monies), as_of=window.as_of)
+        return None
+
+    def _compute_ttm_amount_on_window(
+        self,
+        listing_id: int,
+        repo: RegionFactsRepository,
+        concepts: Sequence[str],
+        *,
+        window: TTMWindow[MonetaryFact],
+        context: str,
+        absolute: bool = False,
+    ) -> Optional[_MoneySnapshot]:
+        """Sum a companion concept over an *already-resolved* anchor window.
+
+        The counterpart to :meth:`_compute_ttm_amount` for the second leg of a
+        two-flow ratio: instead of resolving a window of its own, the companion
+        is summed over exactly the periods the anchor resolved. Dividing a leg
+        measured on one window by a leg measured on another silently compares
+        two different twelve-month spans, which is the failure this closes.
+
+        Concepts are tried in order and the first that supplies a companion for
+        *every* window period wins; a partial pairing is rejected outright
+        rather than summed short (the ``paired_records`` contract). The window's
+        ``as_of`` is the caller's, so no staleness clock is re-derived here.
+        """
+
+        target_currency = require_metric_ticker_currency(
+            listing_id, repo, metric_id=context
+        )
+        for concept in concepts:
+            pairs = paired_records(
+                window, repo.monetary_facts_for_concept(listing_id, concept)
+            )
+            if pairs is None:
+                LOGGER.warning(
+                    "%s: no %s companion aligned to the %s window ending %s for"
+                    " listing_id=%s",
+                    context,
+                    concept,
+                    window.cadence,
+                    window.as_of,
+                    listing_id,
+                )
+                continue
+            monies = [
+                self._money(
+                    companion,
+                    listing_id=listing_id,
+                    target_currency=target_currency,
+                    context=context,
+                    absolute=absolute,
+                )
+                for _, companion in pairs
             ]
             return _MoneySnapshot(money=sum_money(monies), as_of=window.as_of)
         return None
