@@ -11,10 +11,10 @@ One row per `(provider, canonical_symbol)`.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-07-11`
-- Row count: `937`
+- Snapshot source: `data/pyvalue.db` on `2026-07-28`
+- Row count: `942`
 - Table size: `81,920 bytes` (`80.0 KiB`)
-- Approximate bytes per row: `87.4`
+- Approximate bytes per row: `87.0`
 <!-- END generated_live_stats -->
 
 ## Columns
@@ -72,7 +72,7 @@ One row per `(provider, canonical_symbol)`.
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-07-11`
+- Snapshot source: `data/pyvalue.db` on `2026-07-28`
 - Sample window: first `5` rows returned by SQLite ordered by `provider ASC, canonical_symbol ASC`
 
 ```json
@@ -81,9 +81,9 @@ One row per `(provider, canonical_symbol)`.
     "provider": "EODHD",
     "canonical_symbol": "AEDAUD",
     "min_rate_date": "2009-12-28",
-    "max_rate_date": "2026-04-10",
+    "max_rate_date": "2026-07-17",
     "full_history_backfilled": 1,
-    "last_fetched_at": "2026-04-11T09:54:35.254617+00:00",
+    "last_fetched_at": "2026-07-19T20:36:05.023031+00:00",
     "last_status": "ok",
     "last_error": null,
     "attempts": 0
@@ -92,9 +92,9 @@ One row per `(provider, canonical_symbol)`.
     "provider": "EODHD",
     "canonical_symbol": "AEDCAD",
     "min_rate_date": "2009-12-28",
-    "max_rate_date": "2026-04-10",
+    "max_rate_date": "2026-07-19",
     "full_history_backfilled": 1,
-    "last_fetched_at": "2026-04-11T09:54:35.482293+00:00",
+    "last_fetched_at": "2026-07-19T20:36:05.431057+00:00",
     "last_status": "ok",
     "last_error": null,
     "attempts": 0
@@ -103,9 +103,9 @@ One row per `(provider, canonical_symbol)`.
     "provider": "EODHD",
     "canonical_symbol": "AEDCHF",
     "min_rate_date": "2008-10-16",
-    "max_rate_date": "2026-04-10",
+    "max_rate_date": "2026-07-17",
     "full_history_backfilled": 1,
-    "last_fetched_at": "2026-04-11T09:54:35.785982+00:00",
+    "last_fetched_at": "2026-07-19T20:36:05.882201+00:00",
     "last_status": "ok",
     "last_error": null,
     "attempts": 0
@@ -114,9 +114,9 @@ One row per `(provider, canonical_symbol)`.
     "provider": "EODHD",
     "canonical_symbol": "AEDEUR",
     "min_rate_date": "2004-10-28",
-    "max_rate_date": "2026-04-10",
+    "max_rate_date": "2026-07-17",
     "full_history_backfilled": 1,
-    "last_fetched_at": "2026-04-11T09:54:36.025301+00:00",
+    "last_fetched_at": "2026-07-19T20:36:06.138528+00:00",
     "last_status": "ok",
     "last_error": null,
     "attempts": 0
@@ -125,9 +125,9 @@ One row per `(provider, canonical_symbol)`.
     "provider": "EODHD",
     "canonical_symbol": "AEDGBP",
     "min_rate_date": "2009-12-28",
-    "max_rate_date": "2026-04-10",
+    "max_rate_date": "2026-07-19",
     "full_history_backfilled": 1,
-    "last_fetched_at": "2026-04-11T09:54:36.263020+00:00",
+    "last_fetched_at": "2026-07-19T20:36:06.494821+00:00",
     "last_status": "ok",
     "last_error": null,
     "attempts": 0

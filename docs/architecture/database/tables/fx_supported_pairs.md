@@ -11,10 +11,10 @@ One row per provider FX symbol.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-07-11`
-- Row count: `990`
-- Table size: `102,400 bytes` (`100.0 KiB`)
-- Approximate bytes per row: `103.4`
+- Snapshot source: `data/pyvalue.db` on `2026-07-28`
+- Row count: `994`
+- Table size: `106,496 bytes` (`104.0 KiB`)
+- Approximate bytes per row: `107.1`
 <!-- END generated_live_stats -->
 
 ## Columns
@@ -72,7 +72,7 @@ One row per provider FX symbol.
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-07-11`
+- Snapshot source: `data/pyvalue.db` on `2026-07-28`
 - Sample window: first `5` rows returned by SQLite ordered by `provider ASC, symbol ASC`
 
 ```json
@@ -86,7 +86,7 @@ One row per provider FX symbol.
     "name": "US Dollar/United Arab Emirates dirham FX Spot Rate",
     "is_alias": 1,
     "is_refreshable": 0,
-    "last_seen_at": "2026-04-11T09:54:34.997203+00:00"
+    "last_seen_at": "2026-07-19T20:36:04.544733+00:00"
   },
   {
     "provider": "EODHD",
@@ -97,7 +97,7 @@ One row per provider FX symbol.
     "name": "UAE Dirham/Australian Dollar",
     "is_alias": 0,
     "is_refreshable": 1,
-    "last_seen_at": "2026-04-11T09:54:34.997203+00:00"
+    "last_seen_at": "2026-07-19T20:36:04.544733+00:00"
   },
   {
     "provider": "EODHD",
@@ -108,7 +108,7 @@ One row per provider FX symbol.
     "name": "UAE Dirham/Canadian Dollar",
     "is_alias": 0,
     "is_refreshable": 1,
-    "last_seen_at": "2026-04-11T09:54:34.997203+00:00"
+    "last_seen_at": "2026-07-19T20:36:04.544733+00:00"
   },
   {
     "provider": "EODHD",
@@ -119,7 +119,7 @@ One row per provider FX symbol.
     "name": "UAE Dirham/Swiss Franc",
     "is_alias": 0,
     "is_refreshable": 1,
-    "last_seen_at": "2026-04-11T09:54:34.997203+00:00"
+    "last_seen_at": "2026-07-19T20:36:04.544733+00:00"
   },
   {
     "provider": "EODHD",
@@ -130,7 +130,7 @@ One row per provider FX symbol.
     "name": "UAE Dirham/Euro FX Cross Rate",
     "is_alias": 0,
     "is_refreshable": 1,
-    "last_seen_at": "2026-04-11T09:54:34.997203+00:00"
+    "last_seen_at": "2026-07-19T20:36:04.544733+00:00"
   }
 ]
 ```

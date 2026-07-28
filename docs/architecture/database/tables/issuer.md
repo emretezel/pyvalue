@@ -17,10 +17,10 @@ listings that share an ISIN or an LEI onto one row.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-07-11`
-- Row count: `70,564`
-- Table size: `64,913,408 bytes` (`61.9 MiB`)
-- Approximate bytes per row: `919.9`
+- Snapshot source: `data/pyvalue.db` on `2026-07-28`
+- Row count: `58,562`
+- Table size: `61,538,304 bytes` (`58.7 MiB`)
+- Approximate bytes per row: `1,050.8`
 <!-- END generated_live_stats -->
 
 ## Columns
@@ -80,13 +80,14 @@ listings that share an ISIN or an LEI onto one row.
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-07-11`
+- Snapshot source: `data/pyvalue.db` on `2026-07-28`
 - Sample window: first `5` rows returned by SQLite ordered by `issuer_id ASC`
 
 ```json
 [
   {
     "issuer_id": 1,
+    "lei": "549300EMP9DT6Q35HZ31",
     "name": "Aalberts Industries NV",
     "description": "Aalberts N.V., together with its subsidiaries, offers mission-critical technologies for building, industry, and semicon markets in Europe, the United States, the Asia Pacific, the Middle East, and Africa. The company operates through Building, Industry, and Semicon segments. It offers hydronic flow control systems for heating and cooling to enhance energy efficiency; integrated piping systems to d... <truncated; 966 bytes total>",
     "sector": "Industrials",
@@ -95,6 +96,7 @@ listings that share an ISIN or an LEI onto one row.
   },
   {
     "issuer_id": 2,
+    "lei": "BFXS5XCH7N0Y05NIXW11",
     "name": "ABN Amro Group NV",
     "description": "ABN AMRO Bank N.V. provides various banking products and financial services to retail, private, and corporate banking clients in the Netherlands, rest of Europe, the United States, Asia, and internationally. It operates through three segments: Personal & Business Banking, Wealth Management, and Corporate Banking. The company offers fixed deposits; home improvement; mortgage products; investment pr... <truncated; 925 bytes total>",
     "sector": "Financial Services",
@@ -103,6 +105,7 @@ listings that share an ISIN or an LEI onto one row.
   },
   {
     "issuer_id": 3,
+    "lei": "7245001M40ANG7IIS437",
     "name": "Amsterdam Commodities NV",
     "description": "Acomo N.V., together with its subsidiaries, engages in sourcing, trading, processing, packaging, and distributing conventional and organic food ingredients and solutions for the food and beverage industry in the Netherlands, Germany, other European countries, North America, and internationally. It operates through five segments: Spices and Nuts, Edible Seeds, Organic Ingredients, Tea, and Food Sol... <truncated; 1893 bytes total>",
     "sector": "Consumer Defensive",
@@ -111,6 +114,7 @@ listings that share an ISIN or an LEI onto one row.
   },
   {
     "issuer_id": 4,
+    "lei": "724500C9GNBV20UYRX36",
     "name": "Koninklijke Ahold Delhaize NV",
     "description": "Koninklijke Ahold Delhaize N.V. operates retail food stores and e-commerce in the Netherlands, the United States, and internationally. The company's stores offer produce, dairy, meat, deli, bakery, seafood, and frozen products; grocery, beer, and wine; floral, pet food, health and beauty care, kitchen and cookware, gardening tools, general merchandise articles, electronics, newspapers and magazine... <truncated; 930 bytes total>",
     "sector": "Consumer Defensive",
@@ -119,6 +123,7 @@ listings that share an ISIN or an LEI onto one row.
   },
   {
     "issuer_id": 5,
+    "lei": "724500973ODKK3IFQ447",
     "name": "Adyen NV",
     "description": "Adyen N.V. operates a payments platform in Europe, the Middle East, Africa, North America, the Asia Pacific, and Latin America. Its platform integrates payments stack, including gateway, risk management, processing, acquiring, and settlement services. The company offers a back-end infrastructure for authorizing. It accepts payment through online, in-person payments, cross channel, and Adyen for Pl... <truncated; 816 bytes total>",
     "sector": "Technology",

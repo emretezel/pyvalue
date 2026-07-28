@@ -11,10 +11,10 @@ One row per `provider_listing_id`.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-07-11`
-- Row count: `53,969`
-- Table size: `6,733,824 bytes` (`6.4 MiB`)
-- Approximate bytes per row: `124.8`
+- Snapshot source: `data/pyvalue.db` on `2026-07-28`
+- Row count: `56,814`
+- Table size: `6,270,976 bytes` (`6.0 MiB`)
+- Approximate bytes per row: `110.4`
 <!-- END generated_live_stats -->
 
 ## Columns
@@ -58,35 +58,35 @@ One row per `provider_listing_id`.
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-07-11`
+- Snapshot source: `data/pyvalue.db` on `2026-07-28`
 - Sample window: first `5` rows returned by SQLite ordered by `provider_listing_id ASC`
 
 ```json
 [
   {
     "provider_listing_id": 1,
-    "normalized_payload_hash": "dccd9d08007aa97929e92800dfd0ad5e5364d638e9b0a58f1bc9df3b5437c6c7",
-    "normalized_at": "2026-07-04T16:33:33.768553+00:00"
+    "normalized_payload_hash": "37c8aa3c7790d68136d5efa02a2072b91392ca2af3f46a58aa0af682a8e19741",
+    "normalized_at": "2026-07-20T20:00:00.863706+00:00"
   },
   {
     "provider_listing_id": 2,
-    "normalized_payload_hash": "381be9035eb7de4f43b546ba6f99bda96ebf7c3cc6072aeeb5632a8cb2a7945a",
-    "normalized_at": "2026-07-04T16:33:35.034111+00:00"
+    "normalized_payload_hash": "dd3e31be549af077921f5415f57ec595ed3d03ab5b27177fcdcaac63f49d90d0",
+    "normalized_at": "2026-07-20T20:00:02.048675+00:00"
   },
   {
     "provider_listing_id": 3,
-    "normalized_payload_hash": "c12f24b84cffcc6b767192d5aee1e7762e738d7212deca7ae427779074c4e8f3",
-    "normalized_at": "2026-07-04T16:33:36.670617+00:00"
+    "normalized_payload_hash": "fe1d333ada9ccbe04d085e0d7d33982af0c647a4fed0f4892ac718ccc8fa99d2",
+    "normalized_at": "2026-07-20T20:00:03.779443+00:00"
   },
   {
     "provider_listing_id": 4,
-    "normalized_payload_hash": "8f65bd3b378e791e97b01fa0cfb0efc7345cdc5d69d946d326368c344002f224",
-    "normalized_at": "2026-07-04T16:33:38.087693+00:00"
+    "normalized_payload_hash": "483efcbf00878652ef39af38b900e60d298251d3b80f4f005ef5ffc985a7cd4c",
+    "normalized_at": "2026-07-20T20:00:05.527799+00:00"
   },
   {
     "provider_listing_id": 5,
-    "normalized_payload_hash": "aea318e6295f0aaa847c235b73c1aad5bab84b65dab11b0c1fa5f77903f6e460",
-    "normalized_at": "2026-07-04T16:33:39.795148+00:00"
+    "normalized_payload_hash": "788f84a20594a8cf7c3604afd3367d25f4e8e8bb635d799d149c8f0d09e5441e",
+    "normalized_at": "2026-07-20T20:00:06.982898+00:00"
   }
 ]
 ```

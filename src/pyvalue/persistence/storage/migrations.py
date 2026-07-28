@@ -9204,6 +9204,135 @@ def _migration_090_drop_listing_lei(conn: sqlite3.Connection) -> None:
         )
 
 
+def _migration_091_purge_phantom_kosdaq_duplicate_listings(
+    conn: sqlite3.Connection,
+) -> None:
+    """Purge canonical KOSDAQ listings that shadow a live KOSPI listing.
+
+    EODHD's KQ (KOSDAQ) exchange-symbol-list published KOSPI tickers -- Korea
+    Zinc (``010130``) and Hanwha Aerospace (``012450``) among them, though both
+    trade only on KOSPI. ``_ensure_provider_listing`` keys a canonical listing on
+    ``(exchange_id, symbol)`` straight from the provider's list, so each bad
+    entry minted its own ``listing`` *and* its own ``issuer``. EODHD withdrew
+    them from the KQ list in mid-July 2026; the refresh that followed purged only
+    the provider layer, because ``purge_provider_listing_rows`` deliberately
+    never deletes canonical rows. What is left is a listing no command can serve:
+    the scope resolver requires provider coverage, so ``compute-metrics`` rejects
+    it outright and every metric derived from it is frozen forever.
+
+    The selection turns on condition 4 below -- the twin must itself be
+    provider-backed. Direction of duplication is *not* uniform: nine KQ listings
+    have a KO twin that is also orphaned, and in seven of those the KQ row holds
+    far more history than the KO row (``023440``: 1,357 facts vs 150). There the
+    KOSDAQ listing is the real one and the KOSPI row is the stub, so purging by
+    market alone would destroy the better dataset. Requiring a live twin excludes
+    all nine.
+
+    Deleting the facts is a net gain even though the payloads are not identical.
+    Of 68,106 fact rows on the 471 phantoms, 46,260 duplicate the twin exactly
+    and 21,442 carry a *different* value for the same key -- a contradictory
+    second history for one company, resolved here in favour of the
+    provider-backed, ISIN-carrying twin. Only 404 rows (``EarningsPerShare`` and
+    ``EarningsPerShareDiluted``, 29 listings) exist nowhere else; that loss was
+    accepted deliberately, the source being a catalog entry the provider itself
+    withdrew.
+
+    This is a point-in-time cleanup, not a fix: nothing reaps a canonical listing
+    that loses its provider row, so a future provider symbol-list correction can
+    mint a fresh crop.
+
+    Idempotent: the predicate selects nothing once the rows are gone.
+    """
+
+    required = (
+        "listing",
+        "issuer",
+        "exchange",
+        "provider_listing",
+    )
+    if not all(_table_exists(conn, name) for name in required):
+        return
+    if "isin" not in _table_columns(conn, "listing"):
+        return
+
+    # Materialise the target set before deleting: the predicate reads `listing`,
+    # which the migration then deletes from, so evaluating it lazily would let
+    # the set shift underneath the statements below.
+    conn.execute("DROP TABLE IF EXISTS _migration_091_phantom")
+    conn.execute(
+        """
+        CREATE TEMP TABLE _migration_091_phantom AS
+        SELECT kq.listing_id AS listing_id, kq.issuer_id AS issuer_id
+        FROM listing kq
+        JOIN "exchange" ekq
+          ON ekq.exchange_id = kq.exchange_id AND ekq.exchange_code = 'KQ'
+        JOIN listing ko
+          ON ko.symbol = kq.symbol
+        JOIN "exchange" eko
+          ON eko.exchange_id = ko.exchange_id AND eko.exchange_code = 'KO'
+        WHERE kq.isin IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM provider_listing pl WHERE pl.listing_id = kq.listing_id
+          )
+          AND EXISTS (
+            SELECT 1 FROM provider_listing pl WHERE pl.listing_id = ko.listing_id
+          )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX _migration_091_phantom_listing
+        ON _migration_091_phantom(listing_id)
+        """
+    )
+
+    # Children before parents: every FK in this schema is NO ACTION, so the
+    # order is hand-maintained rather than delegated to ON DELETE CASCADE.
+    for table in (
+        "metrics",
+        "metric_compute_status",
+        "financial_facts",
+        "financial_facts_refresh_state",
+        "market_data",
+    ):
+        if not _table_exists(conn, table):
+            continue
+        conn.execute(
+            f"""
+            DELETE FROM {table}
+            WHERE listing_id IN (SELECT listing_id FROM _migration_091_phantom)
+            """  # noqa: S608 -- table name comes from the literal tuple above
+        )
+
+    conn.execute(
+        """
+        DELETE FROM listing
+        WHERE listing_id IN (SELECT listing_id FROM _migration_091_phantom)
+        """
+    )
+
+    # Each bad catalog entry minted its own issuer, so these are orphaned by the
+    # delete above. Re-checked against `listing` rather than assumed: an issuer
+    # that also owns a real listing must survive.
+    conn.execute(
+        """
+        DELETE FROM issuer
+        WHERE issuer_id IN (SELECT issuer_id FROM _migration_091_phantom)
+          AND NOT EXISTS (
+            SELECT 1 FROM listing l WHERE l.issuer_id = issuer.issuer_id
+          )
+        """
+    )
+
+    conn.execute("DROP TABLE IF EXISTS _migration_091_phantom")
+
+    fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+    if fk_violations:
+        raise RuntimeError(
+            f"migration 091 left foreign key violations: {fk_violations!r}"
+        )
+
+
 MIGRATIONS: Sequence[Migration] = [
     _migration_001_listings_composite_pk,
     _migration_002_create_uk_company_facts,
@@ -9295,6 +9424,7 @@ MIGRATIONS: Sequence[Migration] = [
     _migration_088_listing_isin_lei_and_status_check,
     _migration_089_issuer_lei_identity,
     _migration_090_drop_listing_lei,
+    _migration_091_purge_phantom_kosdaq_duplicate_listings,
 ]
 
 

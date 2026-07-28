@@ -6152,3 +6152,255 @@ def test_migration_090_preserves_listing_rows(tmp_path: Path) -> None:
         (2, "BBB", None, "secondary"),
     ]
     assert "lei" not in columns
+
+
+# ---------------------------------------------------------------------------
+# Migration 091: purge phantom KOSDAQ duplicates of live KOSPI listings.
+# ---------------------------------------------------------------------------
+
+
+def _seed_migration_091_catalog(conn: sqlite3.Connection) -> None:
+    """Seed one phantom plus every shape the purge must leave alone.
+
+    exchange 1 = KO (KOSPI), exchange 2 = KQ (KOSDAQ). Listing ids are chosen so
+    each case reads on its own: 1x = KOSPI rows, 2x = KOSDAQ rows.
+    """
+
+    conn.execute("CREATE TABLE issuer (issuer_id INTEGER PRIMARY KEY, name TEXT)")
+    conn.execute(
+        "CREATE TABLE exchange (exchange_id INTEGER PRIMARY KEY, exchange_code TEXT)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE listing (
+            listing_id INTEGER PRIMARY KEY,
+            issuer_id INTEGER NOT NULL REFERENCES issuer(issuer_id),
+            exchange_id INTEGER NOT NULL REFERENCES "exchange"(exchange_id),
+            symbol TEXT NOT NULL,
+            currency TEXT NOT NULL,
+            isin TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE provider_listing (
+            provider_listing_id INTEGER PRIMARY KEY,
+            provider_exchange_id INTEGER NOT NULL,
+            provider_symbol TEXT NOT NULL,
+            listing_id INTEGER NOT NULL REFERENCES listing(listing_id)
+        )
+        """
+    )
+    for table, extra in (
+        ("metrics", "metric_id TEXT NOT NULL, value REAL NOT NULL"),
+        ("metric_compute_status", "metric_id TEXT NOT NULL, status TEXT NOT NULL"),
+        ("financial_facts", "concept TEXT NOT NULL, value REAL NOT NULL"),
+        ("financial_facts_refresh_state", "refreshed_at TEXT NOT NULL"),
+        ("market_data", "as_of TEXT NOT NULL, price REAL NOT NULL"),
+    ):
+        conn.execute(
+            f"CREATE TABLE {table} (listing_id INTEGER NOT NULL "
+            f"REFERENCES listing(listing_id), {extra})"
+        )
+
+    conn.executemany(
+        "INSERT INTO issuer VALUES (?, ?)",
+        [
+            (10, "Korea Zinc Inc"),  # live KOSPI issuer
+            (20, "Korea Zinc Co. Ltd."),  # phantom's own issuer -- purged
+            (11, "Provider Backed KQ Co"),
+            (12, "Shared Issuer Co"),
+            (13, "Orphan Twin KOSPI Co"),
+            (23, "Orphan Twin KOSDAQ Co"),
+            (24, "Isin Bearing KQ Co"),
+        ],
+    )
+    conn.executemany("INSERT INTO exchange VALUES (?, ?)", [(1, "KO"), (2, "KQ")])
+    conn.executemany(
+        "INSERT INTO listing VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            # The phantom and its live KOSPI twin.
+            (10, 10, 1, "010130", "KRW", "KR7010130003"),
+            (20, 20, 2, "010130", "KRW", None),
+            # A genuine KOSDAQ listing that still has provider coverage.
+            (21, 11, 2, "035720", "KRW", None),
+            # Issuer 12 owns a KOSPI listing *and* a phantom: issuer survives.
+            (12, 12, 1, "000660", "KRW", "KR7000660001"),
+            (22, 12, 2, "000660", "KRW", None),
+            # Inverted case: KQ row whose KO twin is also orphaned.
+            (13, 13, 1, "023440", "KRW", None),
+            (23, 23, 2, "023440", "KRW", None),
+            # KQ duplicate that carries an ISIN.
+            (14, 10, 1, "017040", "KRW", "KR7017040007"),
+            (24, 24, 2, "017040", "KRW", "KR7017040007"),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO provider_listing VALUES (?, ?, ?, ?)",
+        [
+            (100, 1, "010130", 10),  # live KOSPI twin
+            (101, 2, "035720", 21),  # provider-backed KOSDAQ listing
+            (102, 1, "000660", 12),  # live KOSPI twin for the shared issuer
+            (103, 1, "017040", 14),  # live KOSPI twin of the ISIN-bearing KQ row
+        ],
+    )
+    # Dependent rows on the two purgeable phantoms (20, 22) and on rows that
+    # must survive (10, 23).
+    conn.executemany(
+        "INSERT INTO metrics VALUES (?, ?, ?)",
+        [
+            (20, "earnings_yield", 0.04),
+            (10, "earnings_yield", 0.03),
+            (22, "earnings_yield", 0.02),
+            (23, "earnings_yield", 0.01),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO metric_compute_status VALUES (?, ?, ?)",
+        [
+            (20, "earnings_yield", "success"),
+            (10, "earnings_yield", "success"),
+            (23, "earnings_yield", "success"),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO financial_facts VALUES (?, ?, ?)",
+        [
+            (20, "EarningsPerShare", 42579.88),
+            (10, "EarningsPerShare", 42579.88),
+            (23, "EarningsPerShare", 1234.5),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO financial_facts_refresh_state VALUES (?, ?)",
+        [(20, "2026-07-10"), (10, "2026-07-10"), (23, "2026-07-10")],
+    )
+    conn.executemany(
+        "INSERT INTO market_data VALUES (?, ?, ?)",
+        [
+            (20, "2026-04-10", 1581000.0),
+            (10, "2026-07-27", 1029000.0),
+            (23, "2026-04-10", 5000.0),
+        ],
+    )
+
+
+def test_migration_091_purges_only_shadowed_provider_less_kosdaq_rows(
+    tmp_path: Path,
+) -> None:
+    """Migration 091 deletes KQ listings that are ISIN-less, provider-less and
+    shadowed by a *live* KOSPI twin -- and nothing else. The inverted case
+    (KQ row whose KO twin is also orphaned) is the regression that matters:
+    there the KOSDAQ row is the real listing."""
+
+    from pyvalue.persistence.storage.migrations import (
+        _migration_091_purge_phantom_kosdaq_duplicate_listings,
+    )
+
+    db_path = tmp_path / "purge-phantom-kosdaq.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        _seed_migration_091_catalog(conn)
+
+        _migration_091_purge_phantom_kosdaq_duplicate_listings(conn)
+
+        listings = [
+            row[0]
+            for row in conn.execute(
+                "SELECT listing_id FROM listing ORDER BY listing_id"
+            )
+        ]
+        issuers = [
+            row[0]
+            for row in conn.execute("SELECT issuer_id FROM issuer ORDER BY issuer_id")
+        ]
+        metrics = [
+            row[0]
+            for row in conn.execute(
+                "SELECT listing_id FROM metrics ORDER BY listing_id"
+            )
+        ]
+        facts = [
+            row[0]
+            for row in conn.execute(
+                "SELECT listing_id FROM financial_facts ORDER BY listing_id"
+            )
+        ]
+        prices = [
+            row[0]
+            for row in conn.execute(
+                "SELECT listing_id FROM market_data ORDER BY listing_id"
+            )
+        ]
+        statuses = [
+            row[0]
+            for row in conn.execute(
+                "SELECT listing_id FROM metric_compute_status ORDER BY listing_id"
+            )
+        ]
+        refresh_state = [
+            row[0]
+            for row in conn.execute(
+                "SELECT listing_id FROM financial_facts_refresh_state "
+                "ORDER BY listing_id"
+            )
+        ]
+        fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+
+    # 20 and 22 are the only phantoms; 21 (provider-backed), 23 (orphaned twin)
+    # and 24 (carries an ISIN) all survive alongside every KOSPI row.
+    assert listings == [10, 12, 13, 14, 21, 23, 24]
+    # Issuer 20 existed only for the phantom; issuer 12 also owns KOSPI row 12.
+    assert issuers == [10, 11, 12, 13, 23, 24]
+    assert metrics == [10, 23]
+    assert facts == [10, 23]
+    assert prices == [10, 23]
+    assert statuses == [10, 23]
+    assert refresh_state == [10, 23]
+    assert fk_violations == []
+
+
+def test_migration_091_is_idempotent(tmp_path: Path) -> None:
+    """Re-running the purge changes nothing: the predicate selects no rows once
+    the phantoms are gone."""
+
+    from pyvalue.persistence.storage.migrations import (
+        _migration_091_purge_phantom_kosdaq_duplicate_listings,
+    )
+
+    db_path = tmp_path / "purge-phantom-kosdaq-idempotent.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        _seed_migration_091_catalog(conn)
+
+        _migration_091_purge_phantom_kosdaq_duplicate_listings(conn)
+        after_first = conn.execute(
+            "SELECT listing_id FROM listing ORDER BY listing_id"
+        ).fetchall()
+        _migration_091_purge_phantom_kosdaq_duplicate_listings(conn)
+        after_second = conn.execute(
+            "SELECT listing_id FROM listing ORDER BY listing_id"
+        ).fetchall()
+
+    assert after_first == after_second
+
+
+def test_migration_091_no_ops_without_the_catalog_tables(tmp_path: Path) -> None:
+    """A database predating the canonical catalog is left untouched rather than
+    raising -- matching the table-existence guards of migrations 085/086."""
+
+    from pyvalue.persistence.storage.migrations import (
+        _migration_091_purge_phantom_kosdaq_duplicate_listings,
+    )
+
+    db_path = tmp_path / "purge-phantom-kosdaq-empty.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE unrelated (id INTEGER PRIMARY KEY)")
+
+        _migration_091_purge_phantom_kosdaq_duplicate_listings(conn)
+
+        tables = {
+            row[0]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+
+    assert tables == {"unrelated"}

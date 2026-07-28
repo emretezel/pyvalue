@@ -13,7 +13,7 @@ not currently blocked by a fundamentals fetch failure.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-07-11`
+- Snapshot source: `data/pyvalue.db` on `2026-07-28`
 - Row count: `0`
 - Table size: `4,096 bytes` (`4.0 KiB`)
 - Approximate bytes per row: `0.0`
@@ -63,7 +63,7 @@ not currently blocked by a fundamentals fetch failure.
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-07-11`
+- Snapshot source: `data/pyvalue.db` on `2026-07-28`
 - Sample window: first `0` rows returned by SQLite ordered by `provider_listing_id ASC`
 
 ```json

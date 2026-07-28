@@ -13,10 +13,10 @@ One row per `provider_listing_id`; historical payload versions are not retained.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-07-11`
-- Row count: `71,543`
-- Table size: `17,054,142,464 bytes` (`15.88 GiB`)
-- Approximate bytes per row: `238,376.1`
+- Snapshot source: `data/pyvalue.db` on `2026-07-28`
+- Row count: `71,057`
+- Table size: `16,455,852,032 bytes` (`15.33 GiB`)
+- Approximate bytes per row: `231,586.6`
 <!-- END generated_live_stats -->
 
 ## Columns

@@ -21,10 +21,10 @@ One row per `(provider_listing_id, as_of)` observation date.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-07-11`
-- Row count: `202,629`
-- Table size: `13,475,840 bytes` (`12.9 MiB`)
-- Approximate bytes per row: `66.5`
+- Snapshot source: `data/pyvalue.db` on `2026-07-28`
+- Row count: `310,527`
+- Table size: `20,721,664 bytes` (`19.8 MiB`)
+- Approximate bytes per row: `66.7`
 <!-- END generated_live_stats -->
 
 ## Columns
@@ -77,7 +77,7 @@ One row per `(provider_listing_id, as_of)` observation date.
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-07-11`
+- Snapshot source: `data/pyvalue.db` on `2026-07-28`
 - Sample window: first `5` rows returned by SQLite ordered by `provider_listing_id ASC, as_of ASC`
 
 ```json
@@ -104,18 +104,18 @@ One row per `(provider_listing_id, as_of)` observation date.
     "updated_at": "2026-04-13T16:12:29.084722+00:00"
   },
   {
-    "provider_listing_id": 2,
-    "as_of": "2026-03-20",
-    "price": 26.43,
-    "volume": 11551525,
-    "updated_at": "2026-04-02T14:21:31.509182+00:00"
+    "provider_listing_id": 1,
+    "as_of": "2026-07-17",
+    "price": 40.32,
+    "volume": 262436,
+    "updated_at": "2026-07-19T20:01:29.543952+00:00"
   },
   {
-    "provider_listing_id": 2,
-    "as_of": "2026-04-02",
-    "price": 27.94,
-    "volume": 1975088,
-    "updated_at": "2026-04-06T12:14:34.283301+00:00"
+    "provider_listing_id": 1,
+    "as_of": "2026-07-27",
+    "price": 41.0,
+    "volume": 454206,
+    "updated_at": "2026-07-27T19:03:32.028107+00:00"
   }
 ]
 ```

@@ -11,10 +11,10 @@ One row per `provider_listing_id`.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-07-11`
-- Row count: `53,969`
-- Table size: `2,768,896 bytes` (`2.6 MiB`)
-- Approximate bytes per row: `51.3`
+- Snapshot source: `data/pyvalue.db` on `2026-07-28`
+- Row count: `57,116`
+- Table size: `2,985,984 bytes` (`2.8 MiB`)
+- Approximate bytes per row: `52.3`
 <!-- END generated_live_stats -->
 
 ## Columns
@@ -61,14 +61,14 @@ One row per `provider_listing_id`.
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-07-11`
+- Snapshot source: `data/pyvalue.db` on `2026-07-28`
 - Sample window: first `5` rows returned by SQLite ordered by `provider_listing_id ASC`
 
 ```json
 [
   {
     "provider_listing_id": 1,
-    "last_fetched_at": "2026-04-11T08:25:55.378209+00:00",
+    "last_fetched_at": "2026-07-27T19:03:32.032996+00:00",
     "last_status": "ok",
     "last_error": null,
     "next_eligible_at": null,
@@ -76,7 +76,7 @@ One row per `provider_listing_id`.
   },
   {
     "provider_listing_id": 2,
-    "last_fetched_at": "2026-04-11T08:25:55.378209+00:00",
+    "last_fetched_at": "2026-07-27T19:03:32.032996+00:00",
     "last_status": "ok",
     "last_error": null,
     "next_eligible_at": null,
@@ -84,7 +84,7 @@ One row per `provider_listing_id`.
   },
   {
     "provider_listing_id": 3,
-    "last_fetched_at": "2026-04-11T08:25:55.378209+00:00",
+    "last_fetched_at": "2026-07-27T19:03:32.032996+00:00",
     "last_status": "ok",
     "last_error": null,
     "next_eligible_at": null,
@@ -92,7 +92,7 @@ One row per `provider_listing_id`.
   },
   {
     "provider_listing_id": 4,
-    "last_fetched_at": "2026-04-11T08:25:55.378209+00:00",
+    "last_fetched_at": "2026-07-27T19:03:32.032996+00:00",
     "last_status": "ok",
     "last_error": null,
     "next_eligible_at": null,
@@ -100,7 +100,7 @@ One row per `provider_listing_id`.
   },
   {
     "provider_listing_id": 5,
-    "last_fetched_at": "2026-04-11T08:25:55.378209+00:00",
+    "last_fetched_at": "2026-07-27T19:03:32.032996+00:00",
     "last_status": "ok",
     "last_error": null,
     "next_eligible_at": null,

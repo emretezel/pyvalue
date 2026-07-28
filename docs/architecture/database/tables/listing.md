@@ -12,10 +12,10 @@ One row per `(exchange_id, symbol)`.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-07-11`
-- Row count: `75,926`
-- Table size: `2,412,544 bytes` (`2.3 MiB`)
-- Approximate bytes per row: `31.8`
+- Snapshot source: `data/pyvalue.db` on `2026-07-28`
+- Row count: `75,680`
+- Table size: `3,395,584 bytes` (`3.2 MiB`)
+- Approximate bytes per row: `44.9`
 <!-- END generated_live_stats -->
 
 ## Columns
@@ -52,16 +52,9 @@ One row per `(exchange_id, symbol)`.
 ## Secondary Indexes
 
 <!-- BEGIN generated_secondary_indexes -->
+- `idx_listing_isin (isin)` WHERE isin IS NOT NULL
 - `idx_listing_issuer (issuer_id)`
-- `idx_listing_isin (isin) WHERE isin IS NOT NULL`
 <!-- END generated_secondary_indexes -->
-
-`idx_listing_isin` serves the primary-listing classifier's ISIN peer-group work:
-the `GROUP BY isin` scan over the classified universe and the `WHERE isin = ?`
-peer probe on the ingest path. `EXPLAIN QUERY PLAN` reports both as
-`SEARCH listing USING COVERING INDEX idx_listing_isin`. It is partial because
-~25% of rows carry no ISIN and are never probed — "listings with no ISIN" is not
-a peer group.
 
 ## Main Read Paths
 
@@ -93,7 +86,7 @@ whose listing is absent (creating one would require writing the NOT NULL
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-07-11`
+- Snapshot source: `data/pyvalue.db` on `2026-07-28`
 - Sample window: first `5` rows returned by SQLite ordered by `listing_id ASC`
 
 ```json
@@ -104,6 +97,7 @@ whose listing is absent (creating one would require writing the NOT NULL
     "exchange_id": 1,
     "symbol": "AALB",
     "currency": "EUR",
+    "isin": "NL0000852564",
     "primary_listing_status": "primary"
   },
   {
@@ -112,6 +106,7 @@ whose listing is absent (creating one would require writing the NOT NULL
     "exchange_id": 1,
     "symbol": "ABN",
     "currency": "EUR",
+    "isin": "NL0011540547",
     "primary_listing_status": "primary"
   },
   {
@@ -120,6 +115,7 @@ whose listing is absent (creating one would require writing the NOT NULL
     "exchange_id": 1,
     "symbol": "ACOMO",
     "currency": "EUR",
+    "isin": "NL0000313286",
     "primary_listing_status": "primary"
   },
   {
@@ -128,6 +124,7 @@ whose listing is absent (creating one would require writing the NOT NULL
     "exchange_id": 1,
     "symbol": "AD",
     "currency": "EUR",
+    "isin": "NL0011794037",
     "primary_listing_status": "primary"
   },
   {
@@ -136,6 +133,7 @@ whose listing is absent (creating one would require writing the NOT NULL
     "exchange_id": 1,
     "symbol": "ADYEN",
     "currency": "EUR",
+    "isin": "NL0012969182",
     "primary_listing_status": "primary"
   }
 ]

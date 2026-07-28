@@ -11,10 +11,10 @@ One row per `(listing_id, metric_id)`.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-07-11`
-- Row count: `2,764,510`
-- Table size: `165,482,496 bytes` (`157.8 MiB`)
-- Approximate bytes per row: `59.9`
+- Snapshot source: `data/pyvalue.db` on `2026-07-28`
+- Row count: `3,406,573`
+- Table size: `203,628,544 bytes` (`194.2 MiB`)
+- Approximate bytes per row: `59.8`
 <!-- END generated_live_stats -->
 
 ## Columns
@@ -62,7 +62,7 @@ One row per `(listing_id, metric_id)`.
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-07-11`
+- Snapshot source: `data/pyvalue.db` on `2026-07-28`
 - Sample window: first `5` rows returned by SQLite ordered by `listing_id ASC, metric_id ASC`
 
 ```json
@@ -79,7 +79,7 @@ One row per `(listing_id, metric_id)`.
   {
     "listing_id": 1,
     "metric_id": "altman_z",
-    "value": 2.649516706136721,
+    "value": 2.9172321577700195,
     "as_of": "2025-12-31",
     "unit_kind": "other",
     "currency": null,
@@ -88,7 +88,7 @@ One row per `(listing_id, metric_id)`.
   {
     "listing_id": 1,
     "metric_id": "avg_ic",
-    "value": 3125299999.5,
+    "value": 3125300000.0,
     "as_of": "2025-12-31",
     "unit_kind": "monetary",
     "currency": "EUR",

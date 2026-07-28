@@ -22,10 +22,10 @@ leaving the eight columns below.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-07-11`
-- Row count: `101,576,296`
-- Table size: `7,638,425,600 bytes` (`7.11 GiB`)
-- Approximate bytes per row: `75.2`
+- Snapshot source: `data/pyvalue.db` on `2026-07-28`
+- Row count: `105,960,531`
+- Table size: `8,058,650,624 bytes` (`7.51 GiB`)
+- Approximate bytes per row: `76.1`
 <!-- END generated_live_stats -->
 
 ## Columns
@@ -75,7 +75,7 @@ leaving the eight columns below.
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-07-11`
+- Snapshot source: `data/pyvalue.db` on `2026-07-28`
 - Sample window: first `5` rows returned by SQLite ordered by `listing_id ASC, concept ASC, fiscal_period ASC, end_date ASC`
 
 ```json

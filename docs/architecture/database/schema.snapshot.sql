@@ -98,6 +98,8 @@ CREATE TABLE "fx_supported_pairs" (
                 );
 CREATE TABLE "issuer" (
             issuer_id INTEGER PRIMARY KEY,
+            lei TEXT UNIQUE
+                CHECK (lei IS NULL OR (length(lei) = 20 AND lei = upper(lei) AND lei NOT GLOB '*[^A-Z0-9]*')),
             name TEXT NOT NULL,
             description TEXT,
             sector TEXT,
@@ -115,7 +117,11 @@ CREATE TABLE "listing" (
                        AND symbol GLOB '[A-Z0-9.&^*-]*'),
             currency TEXT NOT NULL
                 CHECK (length(currency) = 3 AND currency = upper(currency) AND currency GLOB '[A-Z][A-Z][A-Z]'),
-            primary_listing_status TEXT NOT NULL DEFAULT 'unknown',
+            isin TEXT
+                CHECK (isin IS NULL OR (length(isin) = 12 AND isin = upper(isin) AND isin NOT GLOB '*[^A-Z0-9]*' AND substr(isin, 1, 2) NOT GLOB '*[^A-Z]*' AND substr(isin, 12, 1) GLOB '[0-9]')),
+            primary_listing_status TEXT NOT NULL DEFAULT 'unknown'
+                CHECK (primary_listing_status
+                       IN ('unknown', 'primary', 'secondary')),
             UNIQUE (exchange_id, symbol),
             FOREIGN KEY (issuer_id) REFERENCES issuer(issuer_id),
             FOREIGN KEY (exchange_id) REFERENCES "exchange"(exchange_id)
@@ -254,8 +260,9 @@ CREATE INDEX idx_fundamentals_raw_last_fetched
         ON fundamentals_raw(last_fetched_at);
 CREATE INDEX idx_fx_supported_pairs_refreshable
                 ON fx_supported_pairs(provider, is_refreshable, canonical_symbol);
-CREATE UNIQUE INDEX idx_issuer_name_country
-        ON issuer(name, country);
+CREATE INDEX idx_listing_isin
+        ON listing(isin)
+        WHERE isin IS NOT NULL;
 CREATE INDEX idx_listing_issuer
         ON listing(issuer_id);
 CREATE INDEX idx_provider_listing_listing

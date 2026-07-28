@@ -11,10 +11,10 @@ One row per `(listing_id, metric_id)`.
 ## Live Stats
 
 <!-- BEGIN generated_live_stats -->
-- Snapshot source: `data/pyvalue.db` on `2026-07-11`
-- Row count: `5,464,690`
-- Table size: `1,443,336,192 bytes` (`1.34 GiB`)
-- Approximate bytes per row: `264.1`
+- Snapshot source: `data/pyvalue.db` on `2026-07-28`
+- Row count: `5,693,646`
+- Table size: `1,408,651,264 bytes` (`1.31 GiB`)
+- Approximate bytes per row: `247.4`
 <!-- END generated_live_stats -->
 
 ## Columns
@@ -67,7 +67,7 @@ One row per `(listing_id, metric_id)`.
 ## Sample Rows
 
 <!-- BEGIN generated_sample_rows -->
-- Snapshot source: `data/pyvalue.db` on `2026-07-11`
+- Snapshot source: `data/pyvalue.db` on `2026-07-28`
 - Sample window: first `5` rows returned by SQLite ordered by `listing_id ASC, metric_id ASC`
 
 ```json
@@ -78,11 +78,11 @@ One row per `(listing_id, metric_id)`.
     "status": "success",
     "reason_code": null,
     "reason_detail": null,
-    "attempted_at": "2026-07-06T18:28:55.227678+00:00",
+    "attempted_at": "2026-07-27T19:27:24.510787+00:00",
     "value_as_of": "2025-12-31",
-    "facts_refreshed_at": "2026-07-04T16:33:33.762781+00:00",
-    "market_data_as_of": "2026-04-10",
-    "market_data_updated_at": "2026-04-13T16:12:29.084722+00:00"
+    "facts_refreshed_at": "2026-07-20T20:00:00.855735+00:00",
+    "market_data_as_of": "2026-07-27",
+    "market_data_updated_at": "2026-07-27T19:03:32.028107+00:00"
   },
   {
     "listing_id": 1,
@@ -90,11 +90,11 @@ One row per `(listing_id, metric_id)`.
     "status": "success",
     "reason_code": null,
     "reason_detail": null,
-    "attempted_at": "2026-07-06T18:28:55.229721+00:00",
+    "attempted_at": "2026-07-27T19:27:24.513515+00:00",
     "value_as_of": "2025-12-31",
-    "facts_refreshed_at": "2026-07-04T16:33:33.762781+00:00",
-    "market_data_as_of": "2026-04-10",
-    "market_data_updated_at": "2026-04-13T16:12:29.084722+00:00"
+    "facts_refreshed_at": "2026-07-20T20:00:00.855735+00:00",
+    "market_data_as_of": "2026-07-27",
+    "market_data_updated_at": "2026-07-27T19:03:32.028107+00:00"
   },
   {
     "listing_id": 1,
@@ -102,11 +102,11 @@ One row per `(listing_id, metric_id)`.
     "status": "success",
     "reason_code": null,
     "reason_detail": null,
-    "attempted_at": "2026-07-06T18:28:55.266387+00:00",
+    "attempted_at": "2026-07-27T19:27:24.555293+00:00",
     "value_as_of": "2025-12-31",
-    "facts_refreshed_at": "2026-07-04T16:33:33.762781+00:00",
-    "market_data_as_of": "2026-04-10",
-    "market_data_updated_at": "2026-04-13T16:12:29.084722+00:00"
+    "facts_refreshed_at": "2026-07-20T20:00:00.855735+00:00",
+    "market_data_as_of": "2026-07-27",
+    "market_data_updated_at": "2026-07-27T19:03:32.028107+00:00"
   },
   {
     "listing_id": 1,
@@ -114,11 +114,11 @@ One row per `(listing_id, metric_id)`.
     "status": "success",
     "reason_code": null,
     "reason_detail": null,
-    "attempted_at": "2026-07-06T18:28:55.225064+00:00",
+    "attempted_at": "2026-07-27T19:27:24.506991+00:00",
     "value_as_of": "2025-12-31",
-    "facts_refreshed_at": "2026-07-04T16:33:33.762781+00:00",
-    "market_data_as_of": "2026-04-10",
-    "market_data_updated_at": "2026-04-13T16:12:29.084722+00:00"
+    "facts_refreshed_at": "2026-07-20T20:00:00.855735+00:00",
+    "market_data_as_of": "2026-07-27",
+    "market_data_updated_at": "2026-07-27T19:03:32.028107+00:00"
   },
   {
     "listing_id": 1,
@@ -126,11 +126,11 @@ One row per `(listing_id, metric_id)`.
     "status": "success",
     "reason_code": null,
     "reason_detail": null,
-    "attempted_at": "2026-07-06T18:28:55.223641+00:00",
+    "attempted_at": "2026-07-27T19:27:24.505280+00:00",
     "value_as_of": "2025-12-31",
-    "facts_refreshed_at": "2026-07-04T16:33:33.762781+00:00",
-    "market_data_as_of": "2026-04-10",
-    "market_data_updated_at": "2026-04-13T16:12:29.084722+00:00"
+    "facts_refreshed_at": "2026-07-20T20:00:00.855735+00:00",
+    "market_data_as_of": "2026-07-27",
+    "market_data_updated_at": "2026-07-27T19:03:32.028107+00:00"
   }
 ]
 ```
