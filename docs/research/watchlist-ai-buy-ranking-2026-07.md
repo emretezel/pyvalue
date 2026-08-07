@@ -297,6 +297,28 @@ and still ranks first — see its entry above.)
   red flag (10Y median 0.97 passes). No screen change proposed — the 10Y
   median gate already provides the through-cycle check.
 
+## Addendum 2026-08-07 — Cloudflare (NET.US) joined the watchlist, not ranked here
+
+`NET.US` was added to the [anchor watchlist](../reference/watchlist.md) on
+2026-08-07, **after** this memo's 2026-07-29 research vintage. It is deliberately
+**not** ranked above, and the nine-name tables have not been reopened — the
+consensus figures, prices, and forward estimates in this memo are point-in-time
+and cannot be extended to a tenth name without re-running the whole sweep.
+
+For the record, Cloudflare would not have placed on this memo's framework in any
+case. It fails QARP on 12 of 14 gates, and unlike every name ranked here it has
+**never** posted a profitable GAAP fiscal year (FY2016 −$17.3M through FY2025
+−$102.3M), which makes the quality leg of the ranking — built on ROIC
+persistence, margin floors, and owner-earnings compounding — inapplicable rather
+than merely weak. Its two genuine strengths (73.3% gross margin, 1.9pp of
+ten-year GM variation) are pricing-power evidence, not evidence of returns on
+capital. See the
+[QARP profile](../reference/watchlist.md#cloudflare-netus-qarp-profile-2026-08-07)
+for the gate-by-gate detail.
+
+A fresh ranking that includes Cloudflare would need its own memo and its own
+web-research sweep.
+
 ## Method appendix
 
 Web research was run 2026-07-29 as four parallel sweeps (mega-cap

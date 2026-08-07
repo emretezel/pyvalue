@@ -25,14 +25,17 @@ A criterion whose metric is NA **fails** — the symbol is excluded from the scr
 
 ## Runbook
 
-`<WL9>` is the watchlist scope line from
-[docs/reference/watchlist.md](../reference/watchlist.md).
+`<WL>` is the watchlist scope line from
+[docs/reference/watchlist.md](../reference/watchlist.md). It is deliberately
+unnumbered: the set grows, and findings below are dated to the set size they were
+measured against (9 names before 2026-07-06, 10 through 2026-08-06, 11 from
+2026-08-07).
 
 ### (a) Recompute watchlist metrics from existing data
 
 ```
-pyvalue normalize-fundamentals --provider EODHD --symbols <WL9> --force   # only when concept mappings changed
-pyvalue compute-metrics --symbols <WL9>
+pyvalue normalize-fundamentals --provider EODHD --symbols <WL> --force   # only when concept mappings changed
+pyvalue compute-metrics --symbols <WL>
 ```
 
 Local computation only (reads stored raw payloads / facts / market data,
@@ -48,10 +51,10 @@ normalizer is payload-hash-gated and will otherwise silently skip re-extraction
 ```
 pyvalue run-screen --config screeners/deep_value_graham.yml --symbols MSFT.US   # per-criterion PASS/FAIL
 pyvalue report-screen-failures --config screeners/deep_value_graham.yml \
-    --symbols <WL9> --output-csv data/output/na_investigation/dvg_watchlist.csv
+    --symbols <WL> --output-csv data/output/na_investigation/dvg_watchlist.csv
 pyvalue report-screen-failures --config screeners/quality_reasonable_price_primary.yml \
-    --symbols <WL9> --output-csv data/output/na_investigation/qarp_watchlist.csv
-pyvalue report-fact-freshness --symbols <WL9> --metrics <na metric ids>
+    --symbols <WL> --output-csv data/output/na_investigation/qarp_watchlist.csv
+pyvalue report-fact-freshness --symbols <WL> --metrics <na metric ids>
 ```
 
 Note (2026-07-05): `report-screen-failures` is now a pure read of persisted
@@ -717,3 +720,37 @@ end-date tolerance on the `share_count_cagr_5y` pair would rescue only
 **976** of the 11,521 exact-match failures — most failing listings genuinely
 lack ~5-year-old share rows — so the strict exact-year match stays (echoes
 the 2026-07-05 n-of-m rejection at ~1.2k).
+
+### 2026-08-07 — Cloudflare (NET.US) added; a legitimate all-NA quality profile
+
+The watchlist grew to 11 with `NET.US` (listing 65665). Full pipeline run:
+fundamentals re-ingested, prices refreshed watchlist-wide, facts re-normalized
+with `--force` (1,639 facts), all 93 metrics recomputed. QARP result and the
+gate-by-gate table live in
+[docs/reference/watchlist.md](../reference/watchlist.md#cloudflare-netus-qarp-profile-2026-08-07);
+ADBE remains the sole watchlist passer.
+
+Relevant to *this* document because Cloudflare produces **six criteria NAs at
+once** — `roic_years_above_12pct`, `roic_10y_min`, `cfo_to_ni_ttm`,
+`cfo_to_ni_10y_median`, `net_debt_to_ebitda`, `owner_earnings_cagr_10y` — and
+every one is **correct**. All ten stored fiscal years are GAAP losses (FY2016
+−$17.3M through FY2025 −$102.3M) with negative operating income throughout, so
+the non-positive-IC, non-positive-NI, non-positive-EBITDA and
+positive-FY-count guards each refuse to emit a number they cannot define.
+
+This is the cleanest available example of the rubric's **structural-NA** class:
+the guards are working, and no calc modification is warranted. Recorded so a
+future NA sweep does not read a six-NA name as evidence of a defect. Contrast
+with the loss-year clusters catalogued above (AMD, INTC, TSLA), where the same
+guards fire on issuers that *do* have profitable years in the window.
+
+**New data-quality observation (not fixed, not NET-specific).** EODHD's
+`EarningsPerShare` series for this listing is non-GAAP while `NetIncomeLoss` is
+GAAP — FY2025 EPS +0.92 against net income −$102.3M, the gap being
+stock-based comp (`sbc_to_revenue` 20.2%). So `eps_ttm` (+0.67) and
+`earnings_yield` (0.24%) carry the opposite sign to `roe_ttm` (−5.88%) for the
+same listing. No QARP or DVG criterion reads those three, so no screen verdict
+is affected today, but the contradiction is latent for any future
+earnings-yield criterion and is likely universe-wide for heavy-SBC issuers.
+Candidate follow-up: derive `eps_ttm` from `NetIncomeLoss` / diluted shares, or
+mark vendor-EPS-derived metrics as non-GAAP-sourced.
