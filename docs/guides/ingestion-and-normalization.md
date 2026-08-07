@@ -64,6 +64,17 @@ when you want a different refresh horizon:
 pyvalue ingest-fundamentals --all-supported --max-age-days 90
 ```
 
+A window of `0` means zero and re-fetches everything in scope, which is how you
+force a symbol that was already refreshed today:
+
+```bash
+pyvalue ingest-fundamentals --symbols ADBE.US --max-age-days 0
+```
+
+Without it, that run reports there is nothing to fetch — see
+[Troubleshooting](../troubleshooting.md) for the two reasons a valid scope can
+come back empty.
+
 ## What Ingestion Does
 
 Ingestion stores raw provider payloads as received, keyed by:

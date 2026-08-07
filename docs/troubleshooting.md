@@ -40,28 +40,43 @@ Typical cause:
 Fix:
 - run `refresh-supported-exchanges --provider EODHD` and `refresh-supported-tickers --provider EODHD --exchange-codes <CODE>`
 
-## No Eligible Supported Tickers Found
+## Nothing To Fetch For &lt;scope&gt;
 
-Typical cause:
-- you ran EODHD bulk fundamentals ingestion before refreshing the stored ticker catalog
+`ingest-fundamentals` and `update-market-data` print this when the scope resolves
+fine but no ticker in it is eligible. It is not a catalog problem: an unsupported
+symbol, an unknown exchange code, an empty scope and (for market data) a secondary
+listing each fail earlier with their own error. Only two causes remain, and the
+message names the one that applies.
 
-Fix:
+**All data is inside the freshness window.** The default `--max-age-days` is 30, so
+a symbol refreshed earlier the same day is skipped. Force a re-fetch with a zero
+window:
 
 ```bash
-pyvalue refresh-supported-exchanges --provider EODHD
-pyvalue refresh-supported-tickers --provider EODHD --exchange-codes US
-pyvalue ingest-fundamentals --provider EODHD --exchange-codes US
+pyvalue ingest-fundamentals --symbols ADBE.US --max-age-days 0
+pyvalue update-market-data --symbols ADBE.US --max-age-days 0
 ```
 
-To see whether a larger global run is done, stale, or blocked by retry backoff:
+Before spending quota, check whether the fresh payload is simply waiting to be
+normalized — a re-fetch of unchanged data will not move any metric:
 
 ```bash
+pyvalue normalize-fundamentals --symbols ADBE.US
+pyvalue compute-metrics --symbols ADBE.US
+```
+
+**Everything stale is serving retry backoff.** Previous failures set
+`next_eligible_at` in the future. Retry immediately, or look up when the wait ends:
+
+```bash
+pyvalue ingest-fundamentals --exchange-codes US --retry-failed-now
 pyvalue report-fundamentals-progress --provider EODHD
 ```
 
 In that summary, `Stored` means a fundamentals payload exists in the DB, while
 `Fresh` means the ticker currently counts as complete for the selected mode and
-freshness window.
+freshness window. `--max-age-days 0` is honoured literally, so it reports
+everything stored as stale.
 
 ## Market Data Global Refresh Progress
 

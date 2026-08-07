@@ -45,6 +45,7 @@ from ._common import (
     _MarketDataExchangeTask,
     _PlannedMarketDataRun,
     _eodhd_request_budget,
+    _no_eligible_tickers_message,
     _normalize_provider,
     _parse_exchange_filters,
     _require_eodhd_key,
@@ -229,7 +230,6 @@ def cmd_report_market_data_progress(
     selected_exchanges = (
         sorted(requested_exchange_codes) if requested_exchange_codes else None
     )
-    effective_max_age_days = max_age_days or 7
 
     ticker_repo = SupportedTickerRepository(database)
     # Read-only progress report: trust the cached primary_listing_status rather
@@ -237,7 +237,7 @@ def cmd_report_market_data_progress(
     breakdown = ticker_repo.market_data_progress_by_exchange(
         provider=provider_norm,
         exchange_codes=selected_exchanges,
-        max_age_days=effective_max_age_days,
+        max_age_days=max_age_days,
         primary_only=True,
     )
     summary = _summarize_progress_breakdown(breakdown)
@@ -276,7 +276,7 @@ def cmd_report_market_data_progress(
     scope_label = (
         ", ".join(selected_exchanges) if selected_exchanges else "all exchanges"
     )
-    mode_label = f"freshness({effective_max_age_days}d)"
+    mode_label = f"freshness({max_age_days}d)"
 
     if summary.total_supported == 0:
         next_action = "Refresh supported tickers first"
@@ -372,7 +372,7 @@ def cmd_update_market_data_stage(
     if provider_norm != "EODHD":
         raise SystemExit("update-market-data currently only supports provider=EODHD.")
 
-    _, symbol_filters, resolved_exchange_codes = _resolve_provider_scope(
+    scope_total, symbol_filters, resolved_exchange_codes = _resolve_provider_scope(
         str(db_path),
         provider_norm,
         symbols,
@@ -410,9 +410,27 @@ def cmd_update_market_data_stage(
         primary_only=True,
     )
     if not eligible:
+        # Same question, backoff ignored: one row is enough to tell "everything
+        # is already fresh" apart from "everything stale is serving backoff".
+        backoff_blocked = respect_backoff and bool(
+            ticker_repo.list_eligible_for_market_data(
+                provider=provider_norm,
+                exchange_codes=resolved_exchange_codes,
+                max_age_days=max_age_days,
+                max_symbols=1,
+                respect_backoff=False,
+                provider_symbols=symbol_filters,
+                primary_only=True,
+            )
+        )
         print(
-            f"No eligible supported tickers found for {scope_label}. "
-            "Refresh supported tickers first or relax freshness filters."
+            _no_eligible_tickers_message(
+                scope_label=scope_label,
+                scope_total=scope_total,
+                max_age_days=max_age_days,
+                backoff_blocked=backoff_blocked,
+                progress_command="report-market-data-progress",
+            )
         )
         return 0
 

@@ -51,6 +51,7 @@ from ._common import (
     _PreparedFundamentalsRun,
     _catalog_bootstrap_guidance,
     _eodhd_request_budget,
+    _no_eligible_tickers_message,
     _normalize_provider,
     _normalize_provider_scope_symbol,
     _parse_exchange_filters,
@@ -308,6 +309,24 @@ def _prepare_eodhd_fundamentals_run(
         missing_only=missing_only,
         provider_symbols=provider_symbols,
     )
+    # An empty scope has two possible causes and the caller has to name the right
+    # one. Re-asking the same question with backoff ignored answers it exactly --
+    # a parallel diagnostic query would be free to drift from the eligibility
+    # rule it is meant to describe. Only one row is needed to settle a yes/no,
+    # and this runs solely on the path where the command has no work to do.
+    backoff_blocked = False
+    if not eligible and respect_backoff:
+        backoff_blocked = bool(
+            ticker_repo.list_eligible_for_fundamentals(
+                provider="EODHD",
+                exchange_codes=exchange_codes,
+                max_age_days=max_age_days,
+                max_symbols=1,
+                respect_backoff=False,
+                missing_only=missing_only,
+                provider_symbols=provider_symbols,
+            )
+        )
     return _PreparedFundamentalsRun(
         rate_value=rate_value,
         daily_limit=daily_limit,
@@ -315,6 +334,7 @@ def _prepare_eodhd_fundamentals_run(
         buffer_calls=buffer_calls,
         request_budget=request_budget,
         eligible=tuple(eligible),
+        backoff_blocked=backoff_blocked,
     )
 
 
@@ -380,12 +400,6 @@ def _run_eodhd_fundamentals_ingestion(
             "No EODHD fundamentals request budget available for this run "
             f"(daily_limit={prepared.daily_limit}, used_calls={prepared.used_calls}, "
             f"buffer_calls={prepared.buffer_calls})."
-        )
-        return 0
-    if not prepared.eligible:
-        print(
-            f"No eligible supported tickers found for {scope_label}. "
-            "Refresh supported tickers first or relax freshness filters."
         )
         return 0
 
@@ -501,10 +515,16 @@ def cmd_report_ingest_progress(
     provider: str,
     database: str,
     exchange_codes: Optional[Sequence[str]],
-    max_age_days: Optional[int],
+    max_age_days: int,
     missing_only: bool,
 ) -> int:
-    """Report EODHD ingest progress across supported tickers."""
+    """Report EODHD ingest progress across supported tickers.
+
+    ``max_age_days`` is the freshness window in days and is always supplied --
+    the parser defaults it to 30. ``--missing-only`` is a separate flag that
+    drops the window entirely (only "a payload exists" is required), which is
+    the sole meaning of a ``None`` window downstream.
+    """
 
     provider_norm = provider.strip().upper()
     if provider_norm != "EODHD":
@@ -516,7 +536,7 @@ def cmd_report_ingest_progress(
     selected_exchanges = (
         sorted(requested_exchange_codes) if requested_exchange_codes else None
     )
-    effective_max_age_days = None if missing_only else (max_age_days or 30)
+    effective_max_age_days = None if missing_only else max_age_days
 
     ticker_repo = SupportedTickerRepository(database)
     breakdown = ticker_repo.progress_by_exchange(
@@ -646,7 +666,7 @@ def cmd_report_fundamentals_progress(
     provider: str,
     database: str,
     exchange_codes: Optional[Sequence[str]],
-    max_age_days: Optional[int],
+    max_age_days: int,
     missing_only: bool,
 ) -> int:
     """Public fundamentals-progress command wrapper."""
@@ -697,6 +717,26 @@ def cmd_ingest_fundamentals_stage(
         respect_backoff=respect_backoff,
         missing_only=max_age_days is None,
     )
+    # An exhausted quota is reported by the runner (it owns the budget numbers),
+    # so only explain an empty scope once there was budget to spend on it.
+    if prepared.request_budget > 0 and not prepared.eligible:
+        ticker_repo = SupportedTickerRepository(db_path)
+        print(
+            _no_eligible_tickers_message(
+                scope_label=scope_label,
+                # Counted lazily: the scope size is only needed for this message,
+                # so the runs that do have work never pay for the count.
+                scope_total=ticker_repo.count_for_provider(
+                    "EODHD",
+                    exchange_codes=resolved_exchange_codes,
+                    provider_symbols=symbol_filters,
+                ),
+                max_age_days=max_age_days,
+                backoff_blocked=prepared.backoff_blocked,
+                progress_command="report-fundamentals-progress",
+            )
+        )
+        return 0
     return _run_eodhd_fundamentals_ingestion(
         database=db_path,
         api_key=api_key,

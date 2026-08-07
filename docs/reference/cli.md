@@ -139,6 +139,10 @@ Notes:
   under the `1000 req/min` provider limit
 - omitted `--max-age-days` now means the same 30-day freshness window used by
   the other CLI freshness filters
+- when nothing in a valid scope is eligible the command says which of the two
+  causes applies — everything is inside the freshness window (rerun with
+  `--max-age-days 0` to force a re-fetch), or everything stale is serving retry
+  backoff (rerun with `--retry-failed-now`)
 
 ### `reconcile-issuer-identity`
 
@@ -218,6 +222,7 @@ Notes:
 
 - `Stored` means a raw fundamentals payload exists in the database
 - `Fresh` means the symbol currently satisfies the selected completeness rule
+- `--max-age-days 0` is honoured literally: every stored payload counts as stale
 - status is strict:
   - `COMPLETE`: no missing, stale, or blocked symbols remain
   - `BLOCKED_BY_BACKOFF`: only retry-blocked failures remain
@@ -299,6 +304,10 @@ Notes:
 - progress across multiple days is tracked through `market_data_fetch_state`
 - no price-anomaly guard runs before persistence; per-symbol fetch errors are
   stored as fetch failures in `market_data_fetch_state`
+- when nothing in a valid scope is eligible the command says which of the two
+  causes applies — everything is inside the freshness window (rerun with
+  `--max-age-days 0` to force a refresh), or everything stale is serving retry
+  backoff (rerun with `--retry-failed-now`)
 
 ### `report-market-data-progress`
 
@@ -315,6 +324,7 @@ Notes:
 
 - `Stored` means a market-data snapshot exists in the database
 - `Fresh` means the latest snapshot satisfies the selected freshness window
+- `--max-age-days 0` is honoured literally: every stored snapshot counts as stale
 - `Recent failures` lists API/network failures
 
 ## Metric Commands

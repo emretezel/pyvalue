@@ -86,7 +86,8 @@ Important behavior:
 Useful options:
 - `--exchange-codes`: limit the run to selected exchanges
 - `--max-symbols`: cap one run
-- `--max-age-days`: change the freshness window
+- `--max-age-days`: change the freshness window; `0` means zero and refreshes
+  everything in scope, including snapshots taken today
 - retry backoff is respected by default; use `--retry-failed-now` to bypass it
 
 ## Progress Reporting

@@ -21,7 +21,11 @@ import pytest
 import requests
 
 from pyvalue import cli
-from pyvalue.cli._common import _MetricWarningCollector, _PreparedFundamentalsRun
+from pyvalue.cli._common import (
+    _MetricWarningCollector,
+    _no_eligible_tickers_message,
+    _PreparedFundamentalsRun,
+)
 from pyvalue.cli.ingest import _run_eodhd_fundamentals_ingestion
 from cli_test_helpers import patch_cli
 from conftest import (
@@ -1837,6 +1841,264 @@ def test_cmd_report_ingest_progress_succeeds_when_user_api_fails(
     assert rc == 0
     assert "Quota:" in output
     assert "- quota unavailable" in output
+
+
+def test_no_eligible_tickers_message_names_the_freshness_window() -> None:
+    message = _no_eligible_tickers_message(
+        scope_label="AAA.US",
+        scope_total=1,
+        max_age_days=30,
+        backoff_blocked=False,
+        progress_command="report-fundamentals-progress",
+    )
+
+    assert "all 1 supported ticker(s)" in message
+    assert "30-day freshness window" in message
+    assert "--max-age-days 0" in message
+
+
+def test_no_eligible_tickers_message_names_backoff_when_work_is_blocked() -> None:
+    message = _no_eligible_tickers_message(
+        scope_label="US",
+        scope_total=7,
+        max_age_days=30,
+        backoff_blocked=True,
+        progress_command="report-fundamentals-progress",
+    )
+
+    assert "retry backoff" in message
+    assert "7 in scope" in message
+    assert "--retry-failed-now" in message
+    assert "report-fundamentals-progress" in message
+    # A blocked scope is not a freshness problem, so widening the window is the
+    # wrong advice and must not be offered.
+    assert "--max-age-days 0" not in message
+
+
+def test_no_eligible_tickers_message_omits_window_when_there_is_none() -> None:
+    message = _no_eligible_tickers_message(
+        scope_label="US",
+        scope_total=3,
+        max_age_days=None,
+        backoff_blocked=False,
+        progress_command="report-fundamentals-progress",
+    )
+
+    assert "already have stored data" in message
+    assert "freshness window" not in message
+    assert "--max-age-days 0" not in message
+
+
+def test_cmd_ingest_fundamentals_stage_explains_a_fresh_scope_without_fetching(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A scope whose data is inside the freshness window is not a catalog problem.
+
+    The scope is validated against the catalog before eligibility runs, so the
+    old "refresh supported tickers first" advice could never apply here.
+    """
+
+    db_path = tmp_path / "stage-fresh-scope.db"
+    store_supported_tickers(
+        db_path,
+        "US",
+        rows=[{"Code": "AAA", "Exchange": "US", "Type": "Common Stock"}],
+    )
+    # Fetched just now, so the default 30-day window leaves nothing eligible.
+    seed_raw_fundamentals(
+        db_path, "EODHD", "AAA.US", {"General": {"Name": "AAA"}}, exchange="US"
+    )
+
+    class FakeClient:
+        def __init__(self, api_key: str) -> None:
+            assert api_key == "TOKEN"
+
+        def user_metadata(self) -> dict[str, object]:
+            return {
+                "dailyRateLimit": "1000",
+                "apiRequests": "0",
+                "apiRequestsDate": datetime.now(timezone.utc).date().isoformat(),
+            }
+
+    def unexpected_fetch(
+        api_key: str, limiter: object, symbol: str
+    ) -> dict[str, object]:
+        raise AssertionError(f"fundamentals fetched for {symbol} with nothing eligible")
+
+    patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
+    patch_cli(monkeypatch, "_require_eodhd_key", lambda: "TOKEN")
+    patch_cli(monkeypatch, "_fetch_symbol_fundamentals", unexpected_fetch)
+    patch_cli(
+        monkeypatch,
+        "Config",
+        lambda: SimpleNamespace(
+            eodhd_api_key="TOKEN",
+            eodhd_fundamentals_daily_buffer_calls=0,
+            eodhd_fundamentals_requests_per_minute=950,
+        ),
+    )
+
+    rc = cli.cmd_ingest_fundamentals_stage(
+        provider="EODHD",
+        database=str(db_path),
+        symbols=["AAA.US"],
+        exchange_codes=None,
+        all_supported=False,
+        rate=None,
+        max_symbols=None,
+        max_age_days=30,
+        respect_backoff=True,
+    )
+
+    output = capsys.readouterr().out
+    assert rc == 0
+    assert "Nothing to fetch for AAA.US" in output
+    assert "all 1 supported ticker(s)" in output
+    assert "30-day freshness window" in output
+    assert "--max-age-days 0" in output
+    assert "Refresh supported tickers first" not in output
+
+
+def test_cmd_ingest_fundamentals_stage_explains_a_backoff_blocked_scope(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db_path = tmp_path / "stage-backoff-scope.db"
+    store_supported_tickers(
+        db_path,
+        "US",
+        rows=[{"Code": "AAA", "Exchange": "US", "Type": "Common Stock"}],
+    )
+    fund_repo = FundamentalsRepository(db_path)
+    fund_repo.initialize_schema()
+    seed_raw_fundamentals(
+        db_path, "EODHD", "AAA.US", {"General": {"Name": "AAA"}}, exchange="US"
+    )
+    # Stale enough to be eligible on freshness alone...
+    stale_at = (datetime.now(timezone.utc) - timedelta(days=45)).isoformat()
+    with fund_repo._connect() as conn:
+        conn.execute(
+            """
+            UPDATE fundamentals_raw
+            SET last_fetched_at = ?
+            WHERE provider_listing_id = (
+                SELECT provider_listing_id
+                FROM provider_listing_catalog
+                WHERE provider = 'EODHD' AND provider_symbol = 'AAA.US'
+            )
+            """,
+            (stale_at,),
+        )
+    # ...but held back by an unexpired retry backoff.
+    FundamentalsFetchStateRepository(db_path).mark_failure("EODHD", "AAA.US", "boom")
+
+    class FakeClient:
+        def __init__(self, api_key: str) -> None:
+            assert api_key == "TOKEN"
+
+        def user_metadata(self) -> dict[str, object]:
+            return {
+                "dailyRateLimit": "1000",
+                "apiRequests": "0",
+                "apiRequestsDate": datetime.now(timezone.utc).date().isoformat(),
+            }
+
+    patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
+    patch_cli(monkeypatch, "_require_eodhd_key", lambda: "TOKEN")
+    patch_cli(
+        monkeypatch,
+        "Config",
+        lambda: SimpleNamespace(
+            eodhd_api_key="TOKEN",
+            eodhd_fundamentals_daily_buffer_calls=0,
+            eodhd_fundamentals_requests_per_minute=950,
+        ),
+    )
+
+    rc = cli.cmd_ingest_fundamentals_stage(
+        provider="EODHD",
+        database=str(db_path),
+        symbols=["AAA.US"],
+        exchange_codes=None,
+        all_supported=False,
+        rate=None,
+        max_symbols=None,
+        max_age_days=30,
+        respect_backoff=True,
+    )
+
+    output = capsys.readouterr().out
+    assert rc == 0
+    assert "retry backoff" in output
+    assert "--retry-failed-now" in output
+    assert "--max-age-days 0" not in output
+
+
+def test_cmd_update_market_data_stage_explains_a_fresh_scope_without_fetching(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db_path = tmp_path / "stage-market-data-fresh.db"
+    store_supported_tickers(
+        db_path,
+        "US",
+        rows=[{"Code": "AAA", "Exchange": "US", "Type": "Common Stock"}],
+    )
+    seed_price(db_path, "AAA.US", date.today().isoformat(), 10.0)
+
+    class FakeClient:
+        def __init__(self, api_key: str) -> None:
+            assert api_key == "TOKEN"
+
+        def user_metadata(self) -> dict[str, object]:
+            return {
+                "dailyRateLimit": "1000",
+                "apiRequests": "0",
+                "apiRequestsDate": datetime.now(timezone.utc).date().isoformat(),
+            }
+
+    class FakeProvider:
+        def __init__(
+            self, api_key: str, session: requests.Session | None = None
+        ) -> None:
+            assert api_key == "TOKEN"
+
+        def latest_prices_for_exchange(
+            self, exchange_code: str
+        ) -> dict[str, PriceQuote]:
+            raise AssertionError("bulk refresh ran with nothing eligible")
+
+        def latest_price(self, symbol: str) -> PriceQuote | None:
+            raise AssertionError(f"price fetched for {symbol} with nothing eligible")
+
+    patch_cli(monkeypatch, "EODHDFundamentalsClient", FakeClient)
+    patch_cli(monkeypatch, "EODHDProvider", FakeProvider)
+    patch_cli(monkeypatch, "_require_eodhd_key", lambda: "TOKEN")
+    patch_cli(
+        monkeypatch,
+        "Config",
+        lambda: SimpleNamespace(
+            eodhd_api_key="TOKEN",
+            eodhd_market_data_daily_buffer_calls=0,
+            eodhd_market_data_requests_per_minute=950,
+        ),
+    )
+
+    rc = cli.cmd_update_market_data_stage(
+        provider="EODHD",
+        database=str(db_path),
+        symbols=["AAA.US"],
+        exchange_codes=None,
+        all_supported=False,
+        rate=None,
+        max_symbols=None,
+        max_age_days=30,
+        respect_backoff=True,
+    )
+
+    output = capsys.readouterr().out
+    assert rc == 0
+    assert "Nothing to fetch for AAA.US" in output
+    assert "30-day freshness window" in output
+    assert "Refresh supported tickers first" not in output
 
 
 def test_plan_market_data_stage_run_uses_bulk_for_large_exchange() -> None:

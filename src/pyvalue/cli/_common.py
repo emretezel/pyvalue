@@ -114,12 +114,18 @@ class _PlannedMarketDataRun:
 
 @dataclass(frozen=True)
 class _PreparedFundamentalsRun:
+    # ``backoff_blocked`` is only meaningful when ``eligible`` is empty: it says
+    # the scope *would* have yielded work if retry backoff were ignored, which
+    # is what lets the caller name the real reason there is nothing to fetch.
+    # Preparation settles it because that is where the eligibility arguments are
+    # already assembled; it stays False on every run that found work.
     rate_value: float
     daily_limit: int
     used_calls: int
     buffer_calls: int
     request_budget: int
     eligible: Tuple[SupportedTicker, ...]
+    backoff_blocked: bool = False
 
 
 @dataclass(frozen=True)
@@ -582,6 +588,52 @@ def _scope_label(
     if exchange_filters:
         return ", ".join(exchange_filters)
     return default_label
+
+
+def _no_eligible_tickers_message(
+    scope_label: str,
+    scope_total: int,
+    max_age_days: Optional[int],
+    backoff_blocked: bool,
+    progress_command: str,
+) -> str:
+    """Explain why a refresh scope yielded no eligible tickers.
+
+    Both refresh commands (``ingest-fundamentals``, ``update-market-data``)
+    validate their scope against the catalog *before* running the eligibility
+    query -- an unsupported symbol, an unknown exchange code, an empty scope and
+    (for market data) a secondary listing each raise :class:`SystemExit` with
+    their own error. So by the time the eligible set comes back empty the
+    catalog is known-good and exactly two causes remain: everything in scope is
+    fresher than the freshness window, or everything that needs a refresh is
+    still serving retry backoff. ``backoff_blocked`` says which, and is settled
+    by re-running the very same eligibility query with backoff ignored rather
+    than by a parallel diagnostic query that could drift from the real rule.
+
+    ``progress_command`` names the report command that shows the next eligible
+    time for this pipeline, so the backoff branch can point at it. A ``None``
+    ``max_age_days`` means the run applied no freshness window at all (it asked
+    only that stored data exist), so there is no window to widen and no
+    ``--max-age-days 0`` escape to offer.
+    """
+
+    if backoff_blocked:
+        return (
+            f"Nothing to fetch for {scope_label}: every ticker needing a refresh "
+            f"({scope_total} in scope) is waiting on retry backoff. Rerun with "
+            f"--retry-failed-now to retry immediately, or run {progress_command} "
+            "to see the next eligible time."
+        )
+    if max_age_days is None:
+        return (
+            f"Nothing to fetch for {scope_label}: all {scope_total} supported "
+            "ticker(s) in scope already have stored data."
+        )
+    return (
+        f"Nothing to fetch for {scope_label}: all {scope_total} supported ticker(s) "
+        f"in scope already have data within the {max_age_days}-day freshness window. "
+        "Rerun with --max-age-days 0 to force a refresh."
+    )
 
 
 def _summarize_progress_breakdown(
