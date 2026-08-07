@@ -24,6 +24,10 @@ This directory is the main documentation home for `pyvalue`. Each file owns one 
 - [EODHD Concept Normalization](reference/eodhd-concept-normalization.md): per-concept mapping from raw EODHD payloads to `financial_facts`.
 - [Anchor Watchlist](reference/watchlist.md): the fixed stock set used to tune screeners, with listing ids and scope lines.
 
+## Portfolio
+
+- [Position Notes](portfolio/README.md): per-holding quarterly tracking notes — yields on cost vs latest price, quality tripwires, and pre-committed sell rules.
+
 ## Research
 
 - [Screener NA Investigation](research/screener-na-investigation.md): which screener metrics come out NA, why, and what to change.
