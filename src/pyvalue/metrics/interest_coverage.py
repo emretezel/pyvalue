@@ -6,15 +6,18 @@ Author: Emre Tezel
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Sequence
+from typing import Optional, Protocol, Sequence
 
 import logging
 
 from pyvalue.facts import MonetaryFact, RegionFactsRepository
 from pyvalue.metrics.balance_sheet import (
     DEBT_EVIDENCE_CONCEPTS,
+    NONCURRENT_LIABILITIES_CONCEPT,
     TOTAL_LIABILITIES_CONCEPT,
-    resolve_debt_evidence,
+    BalanceSheetPosition,
+    resolve_noncurrent_liabilities,
+    resolve_total_debt,
     resolve_total_liabilities,
 )
 from pyvalue.metrics.base import MetricResult
@@ -65,6 +68,34 @@ INTEREST_COVERAGE_CAP: float = 100.0
 CAP_MAX_DEBT_TO_EBIT: float = 1.0
 
 
+class _DebtBoundResolver(Protocol):
+    """Shape shared by every balance-sheet resolver on the cap's bound ladder."""
+
+    def __call__(
+        self,
+        listing_id: int,
+        repo: RegionFactsRepository,
+        *,
+        target_currency: str,
+        metric_id: str,
+        max_age_days: int = ...,
+    ) -> Optional[BalanceSheetPosition]: ...
+
+
+# Ordered tightest bound first: measured debt, then everything owed beyond a
+# year, then the whole liability side. Each rung upper-bounds debt, so the
+# first one that resolves decides -- a looser bound is consulted only when the
+# tighter one has no fresh row, never to overturn it. LiabilitiesNoncurrent
+# joined the ladder in the 2026-08 debt audit: it carries the derivation that
+# used to masquerade as ``LongTermDebt``, and it bounds debt more tightly than
+# total liabilities because the current block is excluded.
+_DEBT_BOUND_LADDER: tuple[tuple[_DebtBoundResolver, str], ...] = (
+    (resolve_total_debt, "debt evidence"),
+    (resolve_noncurrent_liabilities, "no fresh debt facts; noncurrent liabilities"),
+    (resolve_total_liabilities, "no fresh debt facts; total liabilities"),
+)
+
+
 @dataclass(frozen=True)
 class _FreshTTMEbit:
     """Fresh, positive TTM EBIT resolved over the EBIT-only quarterly series."""
@@ -84,7 +115,7 @@ class InterestCoverageMetric:
         + INTEREST_CONCEPTS
         + INTEREST_FALLBACK_CONCEPTS
         + DEBT_EVIDENCE_CONCEPTS
-        + (TOTAL_LIABILITIES_CONCEPT,)
+        + (NONCURRENT_LIABILITIES_CONCEPT, TOTAL_LIABILITIES_CONCEPT)
     )
 
     def compute(
@@ -226,48 +257,33 @@ class InterestCoverageMetric:
 
         threshold = ebit.money * CAP_MAX_DEBT_TO_EBIT
 
-        evidence = resolve_debt_evidence(
-            listing_id, repo, target_currency=ebit.target_currency, metric_id=self.id
-        )
-        if evidence is not None:
-            if evidence.money > threshold:
+        for resolve_bound, description in _DEBT_BOUND_LADDER:
+            bound = resolve_bound(
+                listing_id,
+                repo,
+                target_currency=ebit.target_currency,
+                metric_id=self.id,
+            )
+            if bound is None:
+                continue
+            if bound.money > threshold:
                 fy = self._fy_coverage(listing_id, ebit, ebit_records, interest_records)
                 if fy is not None:
                     return fy
                 LOGGER.warning(
                     "interest_coverage: material debt without measurable interest "
                     "expense for listing_id=%s -- provider data gap, not debt-free "
-                    "(debt evidence %.0f %s > %.1fx TTM EBIT)",
+                    "(%s %.0f %s > %.1fx TTM EBIT)",
                     listing_id,
-                    evidence.money.amount,
-                    evidence.money.currency,
+                    description,
+                    bound.money.amount,
+                    bound.money.currency,
                     CAP_MAX_DEBT_TO_EBIT,
                 )
                 return None
-            # Explicit zero-debt rows and immaterial (lease/derived
-            # contaminated) balances land here -- the genuine debt-free shape.
-            return self._emit_cap(listing_id, ebit)
-
-        liabilities = resolve_total_liabilities(
-            listing_id, repo, target_currency=ebit.target_currency, metric_id=self.id
-        )
-        if liabilities is not None:
-            if liabilities.money > threshold:
-                fy = self._fy_coverage(listing_id, ebit, ebit_records, interest_records)
-                if fy is not None:
-                    return fy
-                LOGGER.warning(
-                    "interest_coverage: no fresh debt facts and material total "
-                    "liabilities for listing_id=%s -- debt is unknown, not zero "
-                    "(liabilities %.0f %s > %.1fx TTM EBIT)",
-                    listing_id,
-                    liabilities.money.amount,
-                    liabilities.money.currency,
-                    CAP_MAX_DEBT_TO_EBIT,
-                )
-                return None
-            # Liabilities upper-bound debt, so a tiny balance sheet is
-            # positive evidence even when every debt field is null.
+            # Every rung upper-bounds debt, so a small bound is positive
+            # evidence: explicit zero-debt rows, immaterial lease balances and
+            # tiny balance sheets all land here -- the genuine debt-free shape.
             return self._emit_cap(listing_id, ebit)
 
         fy = self._fy_coverage(listing_id, ebit, ebit_records, interest_records)

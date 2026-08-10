@@ -14,13 +14,12 @@ semantics identical by construction:
   ``CashAndCashEquivalents`` (required) plus ``ShortTermInvestments``
   (optional add-on) -- providers normalize one or the other rollup, and the
   two-step chain reconstructs the broad definition when only the parts exist;
-- debt: ``ShortTermDebt`` and/or ``LongTermDebt`` -- one side reported alone
-  is a real balance-sheet shape (no current maturities, or no long-term
-  debt), so a single side suffices; with both components absent the
-  provider's ``TotalDebtFromBalanceSheet`` rollup is the fallback (the same
-  components-preferred chain ``invested_capital`` and ``debt_paydown_years``
-  already use -- some feeds populate only the rollup); all three absent means
-  debt is unknown, not zero, and resolves to ``None``;
+- debt: the *broadest measured* of two representations of the same quantity --
+  the ``ShortTermDebt`` + ``LongTermDebt`` component sum, and the provider's
+  ``TotalDebtFromBalanceSheet`` rollup. One component side reported alone is a
+  real balance-sheet shape (no current maturities, or no long-term debt), so a
+  single side suffices; all three absent means debt is unknown, not zero, and
+  resolves to ``None``. See ``resolve_total_debt`` for why the larger wins;
 - freshness: every fact must be within a caller-supplied window (the standard
   400-day one by default) -- a stale balance sheet is a data gap, not a usable
   position. Callers whose income flow resolved on the annual cadence pass the
@@ -28,17 +27,18 @@ semantics identical by construction:
   as fresh as its once-a-year income statement rather than going stale in the
   post-fiscal-year-end gap.
 
-Two further resolvers serve evidence checks rather than net-debt arithmetic:
+Two further resolvers bound the debt burden for listings whose debt concepts
+are absent entirely -- ``interest_coverage`` walks them in order to decide
+whether its debt-free cap is safe to emit:
 
-- ``resolve_debt_evidence``: an *upper bound* on the debt burden -- the
-  larger of the component sum and the provider's total-debt rollup. Used by
-  ``interest_coverage`` to decide whether its debt-free cap is safe to emit;
-  deliberate overstatement (e.g. the normalizer's derived ``LongTermDebt`` =
-  total minus current liabilities, or lease-contaminated rollups) can only
-  *block* a cap, never create one, so it is fail-safe by construction.
-- ``resolve_total_liabilities``: the latest fresh total-liabilities figure,
-  the coarsest upper bound of all (debt is a subset of liabilities), for
-  listings whose feed carries no debt concept at all.
+- ``resolve_noncurrent_liabilities``: everything owed beyond twelve months.
+  Debt is a subset of it, so it is an upper bound -- and a tighter one than
+  total liabilities.
+- ``resolve_total_liabilities``: the coarsest bound of all, for feeds that
+  carry neither a debt concept nor a non-current split.
+
+Both overstate deliberately, which is fail-safe for a cap check: an inflated
+bound can only *block* a debt-free cap, never manufacture one.
 
 Resolvers return ``None`` silently; callers own the metric-scoped logging so
 persisted failure reasons keep their per-metric wording.
@@ -70,6 +70,7 @@ DEBT_CONCEPTS: tuple[str, ...] = ("ShortTermDebt", "LongTermDebt")
 # (``shortLongTermDebtTotal``), which providers populate independently of the
 # component fields -- and total liabilities as the bound of last resort.
 DEBT_EVIDENCE_CONCEPTS: tuple[str, ...] = (*DEBT_CONCEPTS, "TotalDebtFromBalanceSheet")
+NONCURRENT_LIABILITIES_CONCEPT: str = "LiabilitiesNoncurrent"
 TOTAL_LIABILITIES_CONCEPT: str = "Liabilities"
 
 
@@ -129,67 +130,37 @@ def resolve_total_debt(
     metric_id: str,
     max_age_days: int = MAX_FACT_AGE_DAYS,
 ) -> Optional[BalanceSheetPosition]:
-    """Resolve total debt from whichever fresh debt sides are reported.
+    """Resolve total debt as the broadest of the measured representations.
 
-    Components-preferred: the provider's ``TotalDebtFromBalanceSheet`` rollup
-    is consulted only when *neither* component side has a fresh row -- a
-    measured component sum must never be displaced by the rollup (the two can
-    disagree through lease contamination or provider unit errors, which is
-    why ``resolve_debt_evidence`` takes their ``max()`` instead).
+    Providers describe the same debt twice: as components (``ShortTermDebt`` +
+    ``LongTermDebt``) and as a single ``TotalDebtFromBalanceSheet`` rollup.
+    Across the EODHD universe the two agree on only 24% of the 33,004 listings
+    carrying both, so the choice between them is load-bearing rather than
+    cosmetic. **The larger wins.**
+
+    Two representations of one quantity differ because their *scope* differs,
+    and the wider scope is the one that captured more of the balance sheet --
+    most often finance leases, which EODHD folds into the rollup but not into
+    the components. Microsoft (2026-06-30) reported components of $49.97B
+    against a $128.81B rollup; reading the components made a company with
+    $52.0B of net debt look like it held $26.9B of net cash and understated
+    enterprise value by 2.1%.
+
+    Taking the larger is also the safe direction for a value screen: an
+    understated debt figure shrinks EV and *manufactures* a cheap-looking
+    yield, while an overstated one only costs an opportunity.
+
+    This resolver was components-preferred until 2026-08-10, guarding against
+    "lease contamination" of the rollup. Leases are debt -- non-cancellable
+    obligations against productive assets -- so that guard was protecting the
+    wrong number. The genuine hazard behind it was the normalizer's fabricated
+    ``LongTermDebt`` (non-current liabilities filed as borrowings), which would
+    have won this ``max()`` on 46% of the universe. That input was removed at
+    its source in the same audit, which is what makes taking the larger safe;
+    do not reintroduce a derived value into either debt concept.
     """
 
-    short_debt = _latest_recent_fact(
-        repo, listing_id, DEBT_CONCEPTS[0], max_age_days=max_age_days
-    )
-    long_debt = _latest_recent_fact(
-        repo, listing_id, DEBT_CONCEPTS[1], max_age_days=max_age_days
-    )
-    if short_debt is None and long_debt is None:
-        rollup = _latest_recent_fact(
-            repo, listing_id, DEBT_EVIDENCE_CONCEPTS[2], max_age_days=max_age_days
-        )
-        if rollup is None:
-            return None
-        return BalanceSheetPosition(
-            money=_money(rollup, target_currency, listing_id, metric_id),
-            as_of=rollup.end_date,
-        )
-
-    debt_money: Optional[Money] = None
-    as_of_candidates: list[str] = []
-    for record in (short_debt, long_debt):
-        if record is None:
-            continue
-        component = _money(record, target_currency, listing_id, metric_id)
-        debt_money = component if debt_money is None else debt_money + component
-        as_of_candidates.append(record.end_date)
-    # At least one side is present (guarded above).
-    assert debt_money is not None
-    return BalanceSheetPosition(money=debt_money, as_of=max(as_of_candidates))
-
-
-def resolve_debt_evidence(
-    listing_id: int,
-    repo: RegionFactsRepository,
-    *,
-    target_currency: str,
-    metric_id: str,
-    max_age_days: int = MAX_FACT_AGE_DAYS,
-) -> Optional[BalanceSheetPosition]:
-    """Resolve an upper bound on the listing's fresh debt burden.
-
-    Returns the *larger* of the component sum (``resolve_total_debt``) and
-    the provider's ``TotalDebtFromBalanceSheet`` rollup, or ``None`` when no
-    debt concept has a fresh row. ``max()`` -- not the components-preferred
-    chain ``debt_paydown_years`` uses -- because the two representations can
-    disagree (a provider unit error in one field, leases in the other) and an
-    evidence check must trust the worst reading: overstatement blocks a
-    debt-free cap (an honest NA), understatement would manufacture a false
-    gate pass. Do not reuse this for net-debt arithmetic, where a measured
-    single representation is wanted instead.
-    """
-
-    component_sum = resolve_total_debt(
+    component_sum = _component_debt_sum(
         listing_id,
         repo,
         target_currency=target_currency,
@@ -212,6 +183,67 @@ def resolve_debt_evidence(
         return component_sum
     # Both minted to target_currency above, so Money ordering is safe.
     return rollup if rollup.money > component_sum.money else component_sum
+
+
+def _component_debt_sum(
+    listing_id: int,
+    repo: RegionFactsRepository,
+    *,
+    target_currency: str,
+    metric_id: str,
+    max_age_days: int,
+) -> Optional[BalanceSheetPosition]:
+    """Sum whichever fresh component debt sides are reported.
+
+    One side alone is a real balance-sheet shape (no current maturities, or no
+    long-term debt), so a single side suffices; neither side means ``None``.
+    """
+
+    short_debt = _latest_recent_fact(
+        repo, listing_id, DEBT_CONCEPTS[0], max_age_days=max_age_days
+    )
+    long_debt = _latest_recent_fact(
+        repo, listing_id, DEBT_CONCEPTS[1], max_age_days=max_age_days
+    )
+    debt_money: Optional[Money] = None
+    as_of_candidates: list[str] = []
+    for record in (short_debt, long_debt):
+        if record is None:
+            continue
+        component = _money(record, target_currency, listing_id, metric_id)
+        debt_money = component if debt_money is None else debt_money + component
+        as_of_candidates.append(record.end_date)
+    if debt_money is None:
+        return None
+    return BalanceSheetPosition(money=debt_money, as_of=max(as_of_candidates))
+
+
+def resolve_noncurrent_liabilities(
+    listing_id: int,
+    repo: RegionFactsRepository,
+    *,
+    target_currency: str,
+    metric_id: str,
+    max_age_days: int = MAX_FACT_AGE_DAYS,
+) -> Optional[BalanceSheetPosition]:
+    """Resolve the latest fresh non-current-liabilities figure.
+
+    Everything owed beyond twelve months: long-term borrowings plus deferred
+    revenue, deferred tax, pensions and provisions. Debt is a subset, so this
+    bounds it from above -- more tightly than total liabilities, because the
+    current-liability block is excluded. Used only where an upper bound is
+    wanted (``interest_coverage``'s cap check), never as debt itself.
+    """
+
+    fact = _latest_recent_fact(
+        repo, listing_id, NONCURRENT_LIABILITIES_CONCEPT, max_age_days=max_age_days
+    )
+    if fact is None:
+        return None
+    return BalanceSheetPosition(
+        money=_money(fact, target_currency, listing_id, metric_id),
+        as_of=fact.end_date,
+    )
 
 
 def resolve_total_liabilities(
@@ -275,9 +307,10 @@ __all__ = [
     "CASH_CONCEPTS",
     "DEBT_CONCEPTS",
     "DEBT_EVIDENCE_CONCEPTS",
+    "NONCURRENT_LIABILITIES_CONCEPT",
     "TOTAL_LIABILITIES_CONCEPT",
     "resolve_cash_position",
-    "resolve_debt_evidence",
+    "resolve_noncurrent_liabilities",
     "resolve_total_debt",
     "resolve_total_liabilities",
 ]

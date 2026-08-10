@@ -6,11 +6,20 @@ enterprise-value denominator) required a fresh ``ShortTermDebt`` or
 the ``TotalDebtFromBalanceSheet`` rollup -- the last asymmetry against
 ``invested_capital`` / ``debt_paydown_years``, whose chains already accept
 the rollup (research-doc queue item 2; "missing EV debt/cash facts",
-~1k listings). The resolver now uses the same components-preferred chain:
+~1k listings). The resolver was given the same components-preferred chain:
 component sides win, the rollup only fills a component-less balance sheet.
 
-The rescue tests fail on the pre-fix code (metric is ``None``); the
-precedence test pins that a measured component sum is never displaced.
+**The precedence half of that fix was wrong and was reversed on 2026-08-10.**
+Components and rollup are two representations of one quantity at different
+scopes, not a measurement and a guess -- and the rollup is the one that carries
+finance leases. Preferring the components dropped $78.8B of Microsoft's debt,
+reporting $26.9B of net cash against a real $52.0B of net debt. Across the
+universe the two disagree on 76% of the 33,004 listings carrying both. The rule
+is now **broadest measured wins**, which is also what the coverage cap's
+evidence check always used -- the two resolvers merged.
+
+The rescue tests still fail on the pre-fix code (metric is ``None``); the two
+precedence tests pin that the wider reading wins in *either* direction.
 
 Author: Emre Tezel
 """
@@ -145,15 +154,38 @@ def test_ev_to_ebit_resolves_via_debt_rollup() -> None:
     assert abs(result.value - 550.0 / 80.0) < 1e-12
 
 
-def test_component_sides_win_over_rollup() -> None:
-    # A measured component sum (30 + 70 = 100) must never be displaced by a
-    # disagreeing rollup (999, e.g. lease-contaminated): ratio stays 0.5.
+def test_broader_rollup_wins_over_component_sides() -> None:
+    # REVERSED 2026-08-10. This case previously asserted the opposite -- that a
+    # component sum (30 + 70 = 100) "must never be displaced" by a disagreeing
+    # rollup (999). That invariant was wrong: the two are representations of one
+    # quantity at different scopes, and the rollup is the one carrying finance
+    # leases. Preferring the components made Microsoft's $52.0B of net debt read
+    # as $26.9B of net cash. Net debt = 999 - cash 50 = 949; / EBITDA 100.
     repo = _FakeFactsRepo(
         {
             **_income_statement(),
             "ShortTermDebt": _fy("ShortTermDebt", 30.0),
             "LongTermDebt": _fy("LongTermDebt", 70.0),
             "TotalDebtFromBalanceSheet": _fy("TotalDebtFromBalanceSheet", 999.0),
+            "CashAndShortTermInvestments": _fy("CashAndShortTermInvestments", 50.0),
+        }
+    )
+    result = NetDebtToEBITDAMetric().compute(LISTING_ID, repo)
+    assert result is not None
+    assert abs(result.value - 9.49) < 1e-12
+
+
+def test_component_sides_win_when_they_are_the_broader_reading() -> None:
+    # The rule is broadest-measured, not rollup-preferred: where the components
+    # (30 + 70 = 100) exceed the rollup (60) they still win. This is the 42% of
+    # the universe that a naive "always trust the rollup" fix would have
+    # understated. Net debt = 100 - cash 50 = 50; / EBITDA 100 = 0.5.
+    repo = _FakeFactsRepo(
+        {
+            **_income_statement(),
+            "ShortTermDebt": _fy("ShortTermDebt", 30.0),
+            "LongTermDebt": _fy("LongTermDebt", 70.0),
+            "TotalDebtFromBalanceSheet": _fy("TotalDebtFromBalanceSheet", 60.0),
             "CashAndShortTermInvestments": _fy("CashAndShortTermInvestments", 50.0),
         }
     )
