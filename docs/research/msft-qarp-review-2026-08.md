@@ -67,9 +67,19 @@ was correct and has become more so, not less.
 −0.1387). The lease-inclusive figure is **net debt of $51.97B**. The two differ
 by $78.8B.
 
-Cause: the debt rollup uses `LongTermDebt` + `ShortTermDebt`, which at
-2026-06-30 is $31.067B + $18.905B = **$49.97B**. The
-`TotalDebtFromBalanceSheet` fact for the same date is **$128.808B**.
+Cause: `resolve_total_debt` (`src/pyvalue/metrics/balance_sheet.py:124-168`),
+which feeds both `enterprise_value` and `net_debt_to_ebitda`, is
+**components-preferred by explicit design** — the provider's
+`TotalDebtFromBalanceSheet` rollup is consulted *only* when neither
+`ShortTermDebt` nor `LongTermDebt` has a fresh row. At 2026-06-30 both
+components are present, so the resolved figure is $18.905B + $31.067B =
+**$49.97B**, and the $128.808B rollup is never read.
+
+This is not an oversight. The function's own docstring names the rationale:
+"a measured component sum must never be displaced by the rollup (the two can
+disagree through **lease contamination** or provider unit errors)". The
+finding below is therefore a challenge to a deliberate design choice, not a
+bug report.
 
 Both vendor fields are correct — they measure different scopes. Externally
 confirmed: Microsoft's long-term debt excluding the current portion *is*
@@ -97,13 +107,36 @@ $317 to **$306**. All figures in this memo use the lease-inclusive basis.
 
 ### Proposed fixes (not applied — this is a research memo)
 
-1. **Debt rollup priority.** Prefer `TotalDebtFromBalanceSheet` when present,
-   falling back to `LongTermDebt` + `ShortTermDebt`. This is the same code path
-   as the existing NA-round debt rollup fallback. Affects `net_debt_to_ebitda`,
-   `fcf_to_debt`, `debt_paydown_years`, `short_term_debt_share`, and every
-   EV-denominated metric. Expect universe-wide movement in lease-heavy sectors
-   (retail, airlines, REITs), not just MSFT — so the change needs a
-   before/after diff at universe scale before it lands.
+1. **Revisit "lease contamination" in `resolve_total_debt`.** The argument
+   against the current design: finance lease liabilities are on-balance-sheet
+   debt under ASC 842 — non-cancellable obligations against productive assets.
+   For a hyperscaler renting datacenter capacity they are not contamination of
+   the debt figure, they *are* the debt figure, and an EV that omits them
+   understates the claim on the enterprise by 2.1%. The "provider unit errors"
+   half of the rationale remains sound; the lease half does not survive this
+   case.
+
+   **This is the second independent instance of the same defect.** Proposed
+   fix #4 of the [2026-07-26 passer verification](qarp-passers-independent-verification-2026-07.md)
+   already flagged `resolve_total_debt` for Westports (sukuk present in the
+   rollup, absent from the components, net debt 15x understated) and proposed
+   preferring the rollup when it exceeds the component sum by >1.5x. MSFT's
+   ratio is **2.58x** ($128.808B / $49.972B), so that heuristic would catch it.
+   The two cases together argue the heuristic should be adopted — but the
+   trigger is now attested on the largest listing in the watchlist, not only on
+   a Malaysian mid-cap.
+
+   Note the codebase is already internally inconsistent here:
+   `resolve_debt_evidence` (used by `interest_coverage`) takes the **`max()`**
+   of the component sum and the rollup, so it sees $128.808B for MSFT while
+   `enterprise_value` sees $49.97B. Two chains, two answers, same listing,
+   same day.
+
+   Blast radius: `net_debt_to_ebitda`, `fcf_to_debt`, `debt_paydown_years`,
+   `short_term_debt_share`, and every EV-denominated metric — so every price
+   gate. Expect universe-wide movement in lease-heavy sectors (retail,
+   airlines, REITs), not just MSFT. The change needs a before/after diff at
+   universe scale, and a re-run of the QARP passer list, before it lands.
 2. **`LongTermDebt` series discontinuity.** The field drops from $91.838B
    (2025-12-31) to $31.423B (2026-03-31) while `TotalDebtFromBalanceSheet` rises
    $123.278B → $125.432B. Short-term debt moves only +$4.3B over the same step,
