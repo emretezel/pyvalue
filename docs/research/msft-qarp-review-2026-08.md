@@ -105,7 +105,33 @@ coverage-rescue arm with wide room, and the price gate fails either way. But
 every price arm was ~3.4% too generous, and the framework entry price moves from
 $317 to **$306**. All figures in this memo use the lease-inclusive basis.
 
-### Proposed fixes (not applied — this is a research memo)
+### Status: fixed 2026-08-10 (commits `d5d8b34`, `d2e600c`, `c24aad2`)
+
+The investigation below was written before the fix and is kept as the record of
+what was found. What actually landed went further than proposed, because
+reading the code turned up a second defect pushing the opposite way:
+
+- **`LongTermDebt` was fabricated on 46% of the universe.** When the vendor's
+  debt fields were null, normalization wrote
+  `totalLiabilities − totalCurrentLiabilities` — all non-current liabilities —
+  under a concept name asserting borrowed money. That derivation now populates
+  a new `LiabilitiesNoncurrent` concept; `LongTermDebt` carries reported
+  borrowings or nothing.
+- **`resolve_total_debt` now keeps the broader of the two representations**,
+  rather than the rollup-preferred rule proposed below. The components exceed
+  the rollup on 42% of listings, so "always trust the rollup" would have traded
+  one understatement for another. Fixing the fabricated input first is what
+  made the comparison safe.
+- **`resolve_debt_evidence` was deleted** — under the new rule it was identical
+  to `resolve_total_debt`, which ends the split described above.
+- **All five private debt chains were removed**, including
+  `invested_capital`'s, so the ROIC gates and the price gates no longer read
+  different balance sheets.
+
+The universe recompute has **not** been run yet, so the stored metrics
+throughout this memo still reflect the pre-fix figures.
+
+### Fixes as originally proposed
 
 1. **Revisit "lease contamination" in `resolve_total_debt`.** The argument
    against the current design: finance lease liabilities are on-balance-sheet

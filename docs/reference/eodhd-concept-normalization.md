@@ -80,7 +80,7 @@ tables below.
    behavior; see [Normalization and Facts](../architecture/normalization-and-facts.md) for the
    broader FX policy.
 
-## Concept inventory (47)
+## Concept inventory (48)
 
 `F` = directly read from a statement field, `D` = derived/aliased, `S` = snapshot.
 "Periods" are the `fiscal_period` values actually observed in the live table.
@@ -96,7 +96,8 @@ tables below.
 | IntangibleAssetsNetExcludingGoodwill | Balance Sheet | monetary | FY, Q1–Q4 | D |
 | Liabilities | Balance Sheet | monetary | FY, Q1–Q4 | F |
 | LiabilitiesCurrent | Balance Sheet | monetary | FY, Q1–Q4 | F (+component fallback) |
-| LongTermDebt | Balance Sheet | monetary | FY, Q1–Q4 | F (+subtraction fallback) |
+| LiabilitiesNoncurrent | Balance Sheet | monetary | FY, Q1–Q4 | F (+subtraction fallback) |
+| LongTermDebt | Balance Sheet | monetary | FY, Q1–Q4 | F |
 | LongTermDebtNoncurrent | Balance Sheet | monetary | FY, Q1–Q4 | F |
 | NetTangibleAssets | Balance Sheet | monetary | FY, Q1–Q4 | F |
 | NoncontrollingInterestInConsolidatedEntity | Balance Sheet | monetary | FY, Q1–Q4 | F |
@@ -169,9 +170,10 @@ All three statement families share the same header rules; only the leaf field(s)
 | CashAndShortTermInvestments | `cashAndShortTermInvestments` | monetary | — |
 | CashAndCashEquivalents | `cash`, `cashAndEquivalents` | monetary | identity-arbitrated per entry — see note below |
 | ShortTermInvestments | `shortTermInvestments` | monetary | — |
+| LiabilitiesNoncurrent | `nonCurrentLiabilitiesTotal` | monetary | else `totalLiab − totalCurrentLiabilities` (if ≥0) |
 | ShortTermDebt | `shortTermDebt`, `shortLongTermDebt` | monetary | — |
 | LongTermDebtNoncurrent | `longTermDebtNoncurrent`, `longTermDebtTotal`, `longTermDebt` | monetary | — |
-| LongTermDebt | `longTermDebtTotal`, `longTermDebt`, `longTermDebtNoncurrent` | monetary | else `totalLiab − totalCurrentLiabilities` (if ≥0) |
+| LongTermDebt | `longTermDebtTotal`, `longTermDebt`, `longTermDebtNoncurrent` | monetary | **no fallback** — see the debt caveat below |
 | TotalDebtFromBalanceSheet | `shortLongTermDebtTotal` | monetary | — |
 | PropertyPlantAndEquipmentNet | `propertyPlantAndEquipmentNet`, `propertyPlantEquipment`, `netPropertyPlantAndEquipment`, `propertyPlantAndEquipment` | monetary | else `propertyPlantAndEquipmentGross − accumulatedDepreciation` (if ≥0) |
 | EntityCommonStockSharesOutstanding | `shareIssued`, `commonStockSharesOutstanding` | count | currency NULL |
@@ -490,6 +492,26 @@ and pounds.
 
 ## Known subtleties / caveats
 
+- **Debt is reported twice, at two different scopes.** EODHD states the same debt as
+  components (`shortTermDebt`, `longTermDebt`) *and* as a single rollup
+  (`shortLongTermDebtTotal`). They agree on only **24%** of the 33,004 listings carrying
+  both; the rollup is larger on 34% and smaller on 42%. The usual reason the rollup is
+  larger is **finance leases**, which it folds in and the components omit — Microsoft
+  (2026-06-30) reported components of $49.97B against a $128.81B rollup. Normalization
+  stores both faithfully and takes no view; choosing between them is a metric-layer
+  decision, made once in `balance_sheet.broader_debt_reading`, which keeps the broader
+  reading. See [MSFT QARP Review](../research/msft-qarp-review-2026-08.md).
+- **`LongTermDebt` has no fallback, deliberately.** Until 2026-08-10 a null debt field
+  caused `totalLiabilities − totalCurrentLiabilities` to be written into `LongTermDebt` —
+  all non-current liabilities (deferred revenue, deferred tax, pensions, provisions)
+  filed under a name asserting borrowed money, and indistinguishable downstream from a
+  reported figure. It affected **46% of the universe** (24,467 of 53,026 listings with a
+  `LongTermDebt` fact), and where a rollup also existed it exceeded that rollup by more
+  than 2x on 21% of them. The derivation now populates `LiabilitiesNoncurrent`, where the
+  name matches the contents; `LongTermDebt` carries reported borrowings or nothing.
+  **Do not re-add a fallback to either debt concept** — the metric layer now takes the
+  larger of the two debt representations, so any fabricated value would win that
+  comparison and flow straight into enterprise value.
 - **Dead-symbol skeleton payloads carry zero-share sentinels.** 1,051 frontier/OTC symbols
   (Karachi, Egypt, US OTC, Nairobi, Zimbabwe, ...) return skeleton fundamentals: no
   statements, no `General.UpdatedAt`, and `SharesStats.SharesOutstanding = 0` /
