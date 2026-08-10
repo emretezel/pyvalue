@@ -319,6 +319,28 @@ for the gate-by-gate detail.
 A fresh ranking that includes Cloudflare would need its own memo and its own
 web-research sweep.
 
+## Addendum 2026-08-10 — this memo's MSFT valuation is superseded
+
+Microsoft's valuation figures throughout this memo (EV/EBIT 18.8, FCF yield on
+EV 2.6%, "~20x forward", the #2-3 ranking rationale) are **stale**. They were
+computed at the 2026-07-24 close of $381.70 against pre-Q4 fundamentals. Both
+inputs have since moved:
+
+- MSFT reported **FY26 Q4 on 2026-07-29** and rose ~31% to **$499.99** by
+  2026-08-07 — the largest single-day market-cap gain in its history.
+- On FY26 Q4 facts and the lease-adjusted EV, EV/EBIT is now **24.3x** and the
+  FCF yield on EV **1.78%**.
+
+The *verdict* is unchanged and in fact reinforced — MSFT still passes 13 of 14
+QARP gates and still fails only the price gate, now by 38% on its most generous
+arm rather than by the narrower July margin. See
+[MSFT QARP Review (2026-08)](msft-qarp-review-2026-08.md) for the current
+numbers, a maximum-entry-price analysis, and a net-debt defect (finance leases
+excluded from the debt rollup) that this memo's EV figures also carry.
+
+The other eight names have **not** been re-checked and their figures remain at
+the 2026-07-24/29 vintage stated above.
+
 ## Method appendix
 
 Web research was run 2026-07-29 as four parallel sweeps (mega-cap
