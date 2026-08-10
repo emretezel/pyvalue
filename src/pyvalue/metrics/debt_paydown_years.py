@@ -11,10 +11,10 @@ from typing import Optional, Sequence
 import logging
 
 from pyvalue.facts import MonetaryFact, RegionFactsRepository
+from pyvalue.metrics.balance_sheet import DEBT_EVIDENCE_CONCEPTS, resolve_total_debt
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.ttm import resolve_ttm_window
 from pyvalue.metrics.utils import (
-    is_recent_fact,
     require_metric_money,
     require_metric_ticker_currency,
     sum_money,
@@ -25,13 +25,8 @@ LOGGER = logging.getLogger(__name__)
 
 OPERATING_CASH_FLOW_CONCEPTS = ("NetCashProvidedByUsedInOperatingActivities",)
 CAPEX_CONCEPTS = ("CapitalExpenditures",)
-DEBT_COMPONENT_CONCEPTS = ("ShortTermDebt", "LongTermDebt")
-TOTAL_DEBT_FALLBACK_CONCEPTS = ("TotalDebtFromBalanceSheet",)
 REQUIRED_CONCEPTS = tuple(
-    OPERATING_CASH_FLOW_CONCEPTS
-    + CAPEX_CONCEPTS
-    + DEBT_COMPONENT_CONCEPTS
-    + TOTAL_DEBT_FALLBACK_CONCEPTS
+    OPERATING_CASH_FLOW_CONCEPTS + CAPEX_CONCEPTS + DEBT_EVIDENCE_CONCEPTS
 )
 
 
@@ -100,42 +95,24 @@ class _FCFDebtCalculator:
         metric_id: str,
         target_currency: str,
     ) -> Optional[_MoneyResult]:
-        short_debt = self._latest_recent_fact(repo, listing_id, "ShortTermDebt")
-        long_debt = self._latest_recent_fact(repo, listing_id, "LongTermDebt")
-        total_debt = self._latest_recent_fact(
-            repo, listing_id, "TotalDebtFromBalanceSheet"
+        """Delegate to the one shared debt definition.
+
+        This method used to carry its own precedence (both components, else
+        the rollup, else a single side) -- one of five private copies that
+        disagreed with each other and with the shared resolver. The 2026-08
+        debt audit collapsed them: debt means the same thing everywhere or the
+        screen mixes balance sheets across its own gates.
+        """
+
+        position = resolve_total_debt(
+            listing_id,
+            repo,
+            target_currency=target_currency,
+            metric_id=metric_id,
         )
-
-        if short_debt is not None and long_debt is not None:
-            short_money = self._money(
-                short_debt, "ShortTermDebt", target_currency, listing_id, metric_id
-            )
-            long_money = self._money(
-                long_debt, "LongTermDebt", target_currency, listing_id, metric_id
-            )
-            return _MoneyResult(
-                money=short_money + long_money,
-                as_of=max(short_debt.end_date, long_debt.end_date),
-            )
-
-        if total_debt is not None:
-            return _MoneyResult(
-                money=self._money(
-                    total_debt, "TotalDebt", target_currency, listing_id, metric_id
-                ),
-                as_of=total_debt.end_date,
-            )
-
-        one_side = short_debt or long_debt
-        if one_side is None:
+        if position is None:
             return None
-        concept = "ShortTermDebt" if short_debt is not None else "LongTermDebt"
-        return _MoneyResult(
-            money=self._money(
-                one_side, concept, target_currency, listing_id, metric_id
-            ),
-            as_of=one_side.end_date,
-        )
+        return _MoneyResult(money=position.money, as_of=position.as_of)
 
     def _compute_ttm_fcf(
         self,
@@ -205,14 +182,6 @@ class _FCFDebtCalculator:
             ]
             return _MoneyResult(money=sum_money(monies), as_of=window.as_of)
         return None
-
-    def _latest_recent_fact(
-        self, repo: RegionFactsRepository, listing_id: int, concept: str
-    ) -> Optional[MonetaryFact]:
-        record = repo.latest_monetary_fact(listing_id, concept)
-        if record is None or not is_recent_fact(record):
-            return None
-        return record
 
     def _money(
         self,

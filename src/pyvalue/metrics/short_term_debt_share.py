@@ -11,6 +11,7 @@ from typing import Optional
 import logging
 
 from pyvalue.facts import MonetaryFact, RegionFactsRepository
+from pyvalue.metrics.balance_sheet import DEBT_EVIDENCE_CONCEPTS, resolve_total_debt
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import (
     is_recent_fact,
@@ -20,9 +21,6 @@ from pyvalue.metrics.utils import (
 from pyvalue.money import Money
 
 LOGGER = logging.getLogger(__name__)
-
-DEBT_COMPONENT_CONCEPTS = ("ShortTermDebt", "LongTermDebt")
-TOTAL_DEBT_FALLBACK_CONCEPTS = ("TotalDebtFromBalanceSheet",)
 
 
 @dataclass
@@ -36,7 +34,7 @@ class ShortTermDebtShareMetric:
     """Compute short-term debt as a share of total debt (EODHD-only)."""
 
     id: str = "short_term_debt_share"
-    required_concepts = tuple(DEBT_COMPONENT_CONCEPTS + TOTAL_DEBT_FALLBACK_CONCEPTS)
+    required_concepts = DEBT_EVIDENCE_CONCEPTS
 
     def compute(
         self, listing_id: int, repo: RegionFactsRepository
@@ -65,11 +63,16 @@ class ShortTermDebtShareMetric:
             as_of=short_record.end_date,
         )
 
-        total_debt = self._compute_total_debt(
-            listing_id=listing_id,
-            repo=repo,
-            short_debt=short_debt,
+        # The one shared debt definition -- this metric used to carry its own
+        # (long side if present, else the rollup), which could put a
+        # lease-blind denominator under a lease-inclusive numerator. Note the
+        # denominator is now the broader reading universe-wide, so the ratio
+        # sits lower than it did before the 2026-08 debt audit.
+        total_debt = resolve_total_debt(
+            listing_id,
+            repo,
             target_currency=target_currency,
+            metric_id=self.id,
         )
         if total_debt is None:
             LOGGER.warning(
@@ -100,36 +103,6 @@ class ShortTermDebtShareMetric:
             value=ratio,
             as_of=as_of,
             unit_kind="percent",
-        )
-
-    def _compute_total_debt(
-        self,
-        *,
-        listing_id: int,
-        repo: RegionFactsRepository,
-        short_debt: _DebtAmount,
-        target_currency: str,
-    ) -> Optional[_DebtAmount]:
-        long_record = self._latest_recent_fact(repo, listing_id, "LongTermDebt")
-        if long_record is not None:
-            long_money = self._money(
-                long_record, "LongTermDebt", target_currency, listing_id
-            )
-            return _DebtAmount(
-                money=short_debt.money + long_money,
-                as_of=max(short_debt.as_of, long_record.end_date),
-            )
-
-        total_record = self._latest_recent_fact(
-            repo, listing_id, "TotalDebtFromBalanceSheet"
-        )
-        if total_record is None:
-            return None
-        return _DebtAmount(
-            money=self._money(
-                total_record, "TotalDebtFromBalanceSheet", target_currency, listing_id
-            ),
-            as_of=total_record.end_date,
         )
 
     def _latest_recent_fact(

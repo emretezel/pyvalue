@@ -2562,6 +2562,39 @@ def test_fcf_to_debt_metric() -> None:
 
 
 def test_debt_paydown_years_uses_total_debt_fallback() -> None:
+    # The rollup wins when it is the broader reading: max(150, 200) = 200
+    # against TTM FCF 200, so debt clears in one year.
+    metric = DebtPaydownYearsMetric()
+    quarter_dates = _net_debt_quarter_dates()
+    q4 = quarter_dates[0]
+    latest = {
+        "LongTermDebt": fact(
+            concept="LongTermDebt",
+            end_date=q4,
+            value=150.0,
+            currency="USD",
+        ),
+        "TotalDebtFromBalanceSheet": fact(
+            concept="TotalDebtFromBalanceSheet",
+            end_date=q4,
+            value=200.0,
+            currency="USD",
+        ),
+    }
+    repo = _build_fcf_debt_repo(
+        concept_records=_base_debt_paydown_concepts(quarter_dates),
+        latest_records=latest,
+    )
+    result = metric.compute(LISTING_ID, repo)
+    assert result is not None
+    assert result.value == 1.0
+
+
+def test_debt_paydown_years_prefers_a_larger_component_side() -> None:
+    # REVERSED 2026-08-10. This fixture previously asserted 1.0 -- a lone
+    # component side of 999 losing to a 200 rollup. Broadest-measured takes
+    # 999, so paydown is 999 / TTM FCF 200 = 4.995 years. Debt is now defined
+    # identically here and in enterprise_value.
     metric = DebtPaydownYearsMetric()
     quarter_dates = _net_debt_quarter_dates()
     q4 = quarter_dates[0]
@@ -2585,7 +2618,7 @@ def test_debt_paydown_years_uses_total_debt_fallback() -> None:
     )
     result = metric.compute(LISTING_ID, repo)
     assert result is not None
-    assert result.value == 1.0
+    assert abs(result.value - 4.995) < 1e-12
 
 
 def test_debt_paydown_years_uses_one_side_debt_fallback() -> None:
@@ -2717,7 +2750,13 @@ def test_short_term_debt_share_skips_non_positive_total() -> None:
     assert result is None
 
 
-def test_short_term_debt_share_skips_ratio_out_of_bounds() -> None:
+def test_short_term_debt_share_resolves_a_rollup_below_its_own_components() -> None:
+    # ShortTermDebt 120 against a rollup of 100 is contradictory data. Before
+    # the 2026-08 debt audit this metric took the rollup as the denominator and
+    # the 1.2 ratio tripped the bounds guard into NA. Under broadest-measured
+    # the denominator is max(components 120, rollup 100) = 120, so the
+    # contradiction resolves to the honest reading: all reported debt is
+    # short-term.
     metric = ShortTermDebtShareMetric()
     recent = (date.today() - timedelta(days=10)).isoformat()
 
@@ -2728,6 +2767,44 @@ def test_short_term_debt_share_skips_ratio_out_of_bounds() -> None:
                     concept=concept,
                     end_date=recent,
                     value=120.0,
+                    currency="USD",
+                )
+            if concept == "TotalDebtFromBalanceSheet":
+                return fact(
+                    concept=concept,
+                    end_date=recent,
+                    value=100.0,
+                    currency="USD",
+                )
+            return None
+
+    repo = DummyRepo()
+    result = metric.compute(LISTING_ID, repo)
+    assert result is not None
+    assert result.value == 1.0
+
+
+def test_short_term_debt_share_skips_ratio_out_of_bounds() -> None:
+    # The bounds guard is now only reachable through a negative component:
+    # components 120 + (-40) = 80 lose to the rollup 100, leaving a 120/100
+    # ratio above one. Garbage in, NA out.
+    metric = ShortTermDebtShareMetric()
+    recent = (date.today() - timedelta(days=10)).isoformat()
+
+    class DummyRepo(_USDTickerCurrencyRepo):
+        def latest_fact(self, listing_id: int, concept: str) -> FactRecord | None:
+            if concept == "ShortTermDebt":
+                return fact(
+                    concept=concept,
+                    end_date=recent,
+                    value=120.0,
+                    currency="USD",
+                )
+            if concept == "LongTermDebt":
+                return fact(
+                    concept=concept,
+                    end_date=recent,
+                    value=-40.0,
                     currency="USD",
                 )
             if concept == "TotalDebtFromBalanceSheet":

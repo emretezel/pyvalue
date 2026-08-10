@@ -27,8 +27,9 @@ from pyvalue.persistence.storage import MarketDataRepository
 LOGGER = logging.getLogger(__name__)
 
 EV_REQUIRED_CONCEPTS = (
-    # Components plus the TotalDebtFromBalanceSheet rollup: the shared debt
-    # resolver falls back to the rollup when neither component side is fresh.
+    # Components *and* the TotalDebtFromBalanceSheet rollup: the shared debt
+    # resolver compares both and keeps the broader reading, so every one of
+    # them has to be preloaded.
     *DEBT_EVIDENCE_CONCEPTS,
     *CASH_CONCEPTS,
     # EV = market cap + total debt - cash. Market cap (= shares x price) reads a

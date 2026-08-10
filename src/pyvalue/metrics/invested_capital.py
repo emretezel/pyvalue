@@ -11,6 +11,7 @@ from typing import Optional, Sequence
 import logging
 
 from pyvalue.facts import MonetaryFact, RegionFactsRepository
+from pyvalue.metrics.balance_sheet import BalanceSheetPosition, broader_debt_reading
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import (
     MAX_FACT_AGE_DAYS,
@@ -168,21 +169,38 @@ class _InvestedCapitalBase:
         long_debt: Optional[MonetaryFact],
         total_debt: Optional[MonetaryFact],
     ) -> Optional[_Amount]:
-        if short_debt is not None and long_debt is not None:
-            return _Amount(
-                money=self._money(short_debt, target_currency, listing_id)
-                + self._money(long_debt, target_currency, listing_id),
-                as_of=max(short_debt.end_date, long_debt.end_date),
+        # Fact *selection* is this metric's own -- one fiscal period's rows,
+        # not the latest fresh ones -- but the decision between the two debt
+        # representations is the shared rule. This method used to carry a
+        # private copy of that decision (both components, else the rollup,
+        # else one side), which meant the ROIC family valued invested capital
+        # on a lease-blind figure while the price gates used a lease-inclusive
+        # one. See balance_sheet.broader_debt_reading.
+        components: Optional[BalanceSheetPosition] = None
+        component_money: Optional[Money] = None
+        as_of_candidates: list[str] = []
+        for record in (short_debt, long_debt):
+            if record is None:
+                continue
+            component = self._money(record, target_currency, listing_id)
+            component_money = (
+                component if component_money is None else component_money + component
+            )
+            as_of_candidates.append(record.end_date)
+        if component_money is not None:
+            components = BalanceSheetPosition(
+                money=component_money, as_of=max(as_of_candidates)
             )
 
+        rollup: Optional[BalanceSheetPosition] = None
         if total_debt is not None:
-            return _Amount(
+            rollup = BalanceSheetPosition(
                 money=self._money(total_debt, target_currency, listing_id),
                 as_of=total_debt.end_date,
             )
 
-        one_side = short_debt or long_debt
-        if one_side is None:
+        broadest = broader_debt_reading(components, rollup)
+        if broadest is None:
             LOGGER.warning(
                 "invested_capital: missing debt inputs for listing_id=%s on %s/%s",
                 listing_id,
@@ -190,10 +208,7 @@ class _InvestedCapitalBase:
                 key[1],
             )
             return None
-        return _Amount(
-            money=self._money(one_side, target_currency, listing_id),
-            as_of=one_side.end_date,
-        )
+        return _Amount(money=broadest.money, as_of=broadest.as_of)
 
     def _resolve_equity(
         self,

@@ -176,12 +176,31 @@ def resolve_total_debt(
             money=_money(rollup_fact, target_currency, listing_id, metric_id),
             as_of=rollup_fact.end_date,
         )
+    return broader_debt_reading(component_sum, rollup)
+
+
+def broader_debt_reading(
+    component_sum: Optional[BalanceSheetPosition],
+    rollup: Optional[BalanceSheetPosition],
+) -> Optional[BalanceSheetPosition]:
+    """Pick the wider of two measured debt representations.
+
+    The debt *rule* for the whole codebase, kept separate from any particular
+    way of selecting facts. ``resolve_total_debt`` feeds it the latest fresh
+    rows; ``invested_capital`` feeds it one fiscal period's rows. Both must
+    reach the same answer from the same inputs, which is only guaranteed if the
+    comparison itself lives in exactly one place -- before the 2026-08 debt
+    audit five private copies of this decision disagreed with each other.
+
+    Callers must mint both positions to the same currency first, which makes
+    the ``Money`` ordering below well defined. ``None`` when neither side has a
+    usable row: debt is unknown, not zero.
+    """
 
     if component_sum is None:
         return rollup
     if rollup is None:
         return component_sum
-    # Both minted to target_currency above, so Money ordering is safe.
     return rollup if rollup.money > component_sum.money else component_sum
 
 
@@ -309,6 +328,7 @@ __all__ = [
     "DEBT_EVIDENCE_CONCEPTS",
     "NONCURRENT_LIABILITIES_CONCEPT",
     "TOTAL_LIABILITIES_CONCEPT",
+    "broader_debt_reading",
     "resolve_cash_position",
     "resolve_noncurrent_liabilities",
     "resolve_total_debt",
