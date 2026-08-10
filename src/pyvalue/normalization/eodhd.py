@@ -81,6 +81,18 @@ EODHD_STATEMENT_FIELDS = {
         "LiabilitiesCurrent": ["totalCurrentLiabilities"],
         "Assets": ["totalAssets"],
         "Liabilities": ["totalLiabilities", "totalLiab"],
+        # Everything owed beyond twelve months: long-term borrowings *plus*
+        # deferred revenue, deferred tax, pensions and provisions. It is an
+        # upper bound on long-term debt, never a substitute for it -- which is
+        # exactly why it lives under its own name. Until 2026-08-10 this
+        # quantity was written into ``LongTermDebt`` whenever the vendor's debt
+        # fields were null (46% of the universe, 24,467 of 53,026 listings),
+        # where nothing downstream could tell it apart from a reported
+        # borrowing and it flowed straight into enterprise value. It is kept
+        # because ``interest_coverage`` legitimately needs a debt *bound* to
+        # decide whether its debt-free cap is safe; a tighter bound than
+        # ``Liabilities``, and an honest one.
+        "LiabilitiesNoncurrent": ["nonCurrentLiabilitiesTotal"],
         "StockholdersEquity": ["totalStockholderEquity", "totalShareholderEquity"],
         "CommonStockholdersEquity": ["commonStockTotalEquity"],
         # Only genuine preferred-equity fields belong here. EODHD's ``capitalStock``
@@ -474,11 +486,15 @@ class EODHDFactsNormalizer:
                 current_liab = self._extract_value(
                     entry, ["totalCurrentLiabilities"], lowered
                 )
-                derived_debt = None
+                # Reconstructs non-current liabilities when the vendor nulls
+                # its own ``nonCurrentLiabilitiesTotal``. Feeds
+                # ``LiabilitiesNoncurrent`` only -- never ``LongTermDebt``,
+                # which must carry reported borrowings or nothing at all.
+                derived_noncurrent_liab = None
                 if total_liab is not None and current_liab is not None:
                     candidate = total_liab - current_liab
                     if candidate >= 0:
-                        derived_debt = candidate
+                        derived_noncurrent_liab = candidate
 
                 arbitrated_cash = None
                 if (
@@ -663,8 +679,8 @@ class EODHDFactsNormalizer:
                         value = derived_current_assets
                     if value is None and concept == "LiabilitiesCurrent":
                         value = derived_current_liab
-                    if value is None and concept == "LongTermDebt":
-                        value = derived_debt
+                    if value is None and concept == "LiabilitiesNoncurrent":
+                        value = derived_noncurrent_liab
                     if value is None and concept == "PropertyPlantAndEquipmentNet":
                         value = derived_ppe
                     if value is None and concept == "OperatingIncomeLoss":
