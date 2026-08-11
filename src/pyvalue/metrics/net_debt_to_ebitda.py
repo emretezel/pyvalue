@@ -14,8 +14,9 @@ from pyvalue.facts import RegionFactsRepository
 from pyvalue.metrics.balance_sheet import (
     CASH_CONCEPTS,
     DEBT_EVIDENCE_CONCEPTS,
+    NONCURRENT_LIABILITIES_CONCEPT,
     resolve_cash_position,
-    resolve_total_debt,
+    resolve_total_debt_bounded,
 )
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.depreciation import (
@@ -53,6 +54,9 @@ class NetDebtToEBITDAMetric:
         + DA_PRIMARY_CONCEPTS
         + DA_FALLBACK_CONCEPTS
         + DEBT_EVIDENCE_CONCEPTS
+        # Upper bound on debt when no debt row is fresh -- see
+        # balance_sheet.resolve_total_debt_bounded.
+        + (NONCURRENT_LIABILITIES_CONCEPT,)
         + CASH_CONCEPTS
     )
 
@@ -117,7 +121,10 @@ class NetDebtToEBITDAMetric:
         *,
         max_age_days: int,
     ) -> Optional[_MoneyResult]:
-        debt = resolve_total_debt(
+        # Overstating debt can only raise this ratio, so an upper bound is the
+        # fail-safe direction for a leverage cap: it can block a listing, never
+        # clear one. See balance_sheet.resolve_total_debt_bounded.
+        debt = resolve_total_debt_bounded(
             listing_id,
             repo,
             target_currency=target_currency,

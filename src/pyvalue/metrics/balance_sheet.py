@@ -18,8 +18,10 @@ semantics identical by construction:
   the ``ShortTermDebt`` + ``LongTermDebt`` component sum, and the provider's
   ``TotalDebtFromBalanceSheet`` rollup. One component side reported alone is a
   real balance-sheet shape (no current maturities, or no long-term debt), so a
-  single side suffices; all three absent means debt is unknown, not zero, and
-  resolves to ``None``. See ``resolve_total_debt`` for why the larger wins;
+  single side suffices; all three absent means debt is unknown, **not zero**,
+  and ``resolve_total_debt`` resolves to ``None``. See ``resolve_total_debt``
+  for why the larger wins, and ``resolve_total_debt_bounded`` for the two
+  callers allowed to substitute an upper bound rather than give up;
 - freshness: every fact must be within a caller-supplied window (the standard
   400-day one by default) -- a stale balance sheet is a data gap, not a usable
   position. Callers whose income flow resolved on the annual cadence pass the
@@ -46,6 +48,8 @@ persisted failure reasons keep their per-metric wording.
 
 from __future__ import annotations
 
+import logging
+
 from dataclasses import dataclass
 from typing import Optional
 
@@ -56,6 +60,8 @@ from pyvalue.metrics.utils import (
     require_metric_money,
 )
 from pyvalue.money import Money
+
+LOGGER = logging.getLogger(__name__)
 
 # Resolution order matters: the first cash concept is the broad rollup, the
 # latter two reconstruct it. Kept as tuples so metric ``required_concepts``
@@ -177,6 +183,73 @@ def resolve_total_debt(
             as_of=rollup_fact.end_date,
         )
     return broader_debt_reading(component_sum, rollup)
+
+
+def resolve_total_debt_bounded(
+    listing_id: int,
+    repo: RegionFactsRepository,
+    *,
+    target_currency: str,
+    metric_id: str,
+    max_age_days: int = MAX_FACT_AGE_DAYS,
+) -> Optional[BalanceSheetPosition]:
+    """Measured total debt, else non-current liabilities as an upper bound.
+
+    For ``enterprise_value`` and ``net_debt_to_ebitda`` only. Both consume debt
+    as one term of a composite, and both are wrong in a *knowable direction*
+    when that term is too large: an inflated debt figure raises EV, which lowers
+    every yield built on it, and raises the leverage ratio. It can only make a
+    listing look worse than it is -- never cheaper, never safer. So substituting
+    an upper bound cannot manufacture a passing gate or a better rank, and the
+    alternative is worse: ``resolve_total_debt`` alone returns ``None`` for
+    every listing whose latest balance sheet carries no debt row, which costs
+    5,255 listings all three price arms and removes them from the screen
+    entirely. Those listings did not become expensive; they became unmeasurable.
+
+    Two callers must **not** use this, and the asymmetry is the whole point:
+
+    - ``short_term_debt_share`` puts total debt in the *denominator* of a share,
+      so a bound there understates the share -- the flattering direction.
+    - ``interest_coverage`` keeps its own ordered ladder because it needs the
+      coarser ``Liabilities`` rung as well, and because it must know which rung
+      answered before deciding whether its debt-free cap is safe to emit.
+
+    Metrics that report a debt figure as their own value (``long_term_debt``,
+    ``debt_paydown_years``, ``fcf_to_debt``) also stay measured-only: there the
+    bound would not be an input to a conclusion, it would *be* the conclusion.
+
+    The substitution is logged at INFO so it is visible in
+    ``data/logs/pyvalue.log`` -- the stored metric carries no provenance column.
+    """
+
+    measured = resolve_total_debt(
+        listing_id,
+        repo,
+        target_currency=target_currency,
+        metric_id=metric_id,
+        max_age_days=max_age_days,
+    )
+    if measured is not None:
+        return measured
+
+    bound = resolve_noncurrent_liabilities(
+        listing_id,
+        repo,
+        target_currency=target_currency,
+        metric_id=metric_id,
+        max_age_days=max_age_days,
+    )
+    if bound is None:
+        return None
+
+    LOGGER.info(
+        "%s: no fresh debt row for listing_id=%s -- bounding total debt by "
+        "non-current liabilities (%s)",
+        metric_id,
+        listing_id,
+        bound.as_of,
+    )
+    return bound
 
 
 def broader_debt_reading(
@@ -332,5 +405,6 @@ __all__ = [
     "resolve_cash_position",
     "resolve_noncurrent_liabilities",
     "resolve_total_debt",
+    "resolve_total_debt_bounded",
     "resolve_total_liabilities",
 ]

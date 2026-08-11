@@ -15,10 +15,13 @@ EODHD reports explicit zeroes when a company genuinely has no debt (141k
 row means unreported -- and on a 1,457-period sample the nearest reported debt
 exceeded 20% of that period's total liabilities in 48.8% of cases.
 
-The bound is safe *here and only here*: it can only inflate invested capital,
-which can only depress a return, so it can never lift a listing over a ROIC
-gate. The last two tests pin that containment -- the metrics that report a
-debt figure to a reader must stay NA.
+The bound is safe wherever the error direction is one-way. Inside invested
+capital it can only inflate the denominator, so it can only depress a return.
+``enterprise_value`` and ``net_debt_to_ebitda`` were added on 2026-08-11 for the
+same reason: an overstated debt figure raises EV and raises leverage, so it can
+block a gate but never clear one. ``short_term_debt_share`` is the counter-case
+and stays NA -- there total debt is the *denominator of a share*, so a bound
+understates it, which is the flattering direction.
 
 Author: Emre Tezel
 """
@@ -29,8 +32,12 @@ from datetime import date, timedelta
 
 from pyvalue.currency import MetricUnitKind
 from pyvalue.facts import FactRecord, RegionFactsRepository
+from pyvalue.marketdata.base import PriceData
+from pyvalue.metrics.enterprise_value_ratios import EVToEBITMetric
 from pyvalue.metrics.invested_capital import ICFYMetric
 from pyvalue.metrics.net_debt_to_ebitda import NetDebtToEBITDAMetric
+from pyvalue.metrics.short_term_debt_share import ShortTermDebtShareMetric
+from pyvalue.persistence.storage import MarketDataRepository
 
 LISTING_ID = 1
 _TODAY = date.today()
@@ -68,6 +75,24 @@ class _FakeFactsRepo(RegionFactsRepository):
         if not records:
             return None
         return max(records, key=lambda record: record.end_date)
+
+    def ticker_currency_by_id(self, listing_id: int) -> str | None:
+        return "USD"
+
+
+class _FakeMarketRepo(MarketDataRepository):
+    # Nominal MarketDataRepository subtype whose __init__ skips super() so no
+    # SQLite DB is opened; serves one fixed fresh in-memory snapshot.
+    def __init__(self, price: float) -> None:
+        self._price = price
+
+    def latest_snapshot_by_id(self, listing_id: int) -> PriceData | None:
+        return PriceData(
+            symbol="TEST.US",
+            price=self._price,
+            as_of=(_TODAY - timedelta(days=1)).isoformat(),
+            currency="USD",
+        )
 
     def ticker_currency_by_id(self, listing_id: int) -> str | None:
         return "USD"
@@ -151,10 +176,18 @@ def test_no_debt_and_no_bound_stays_na() -> None:
     assert ICFYMetric().compute(LISTING_ID, repo) is None
 
 
-def test_net_debt_to_ebitda_does_not_borrow_the_bound() -> None:
-    # Containment. net_debt_to_ebitda reports a debt figure a reader acts on,
-    # and overstating debt there is not wrong-way-safe the way it is inside
-    # invested capital, so the same balance sheet must stay NA.
+def test_net_debt_to_ebitda_also_takes_the_bound() -> None:
+    # REVERSED 2026-08-11 by operator decision. This case originally asserted
+    # containment -- that only invested capital may substitute the bound,
+    # because net_debt_to_ebitda reports a debt figure a reader acts on. The
+    # containment cost 5,255 listings all three price arms and removed six
+    # former QARP passers that had not become expensive, only unmeasurable.
+    #
+    # The error direction settles it: overstating debt can only *raise* this
+    # ratio and *raise* EV, so the bound can block a leverage or price gate but
+    # never clear one -- the same one-way-safe property that justifies it inside
+    # invested capital. Net debt = bound 150 - cash 200 = -50 (net cash);
+    # EBITDA = EBIT 80 + D&A 20 = 100; ratio = -0.5.
     repo = _FakeFactsRepo(
         {
             **_balance_sheet_without_debt(),
@@ -165,4 +198,39 @@ def test_net_debt_to_ebitda_does_not_borrow_the_bound() -> None:
             ),
         }
     )
-    assert NetDebtToEBITDAMetric().compute(LISTING_ID, repo) is None
+    result = NetDebtToEBITDAMetric().compute(LISTING_ID, repo)
+    assert result is not None
+    assert abs(result.value - (-0.5)) < 1e-9
+
+
+def test_enterprise_value_also_takes_the_bound() -> None:
+    # The other half of the 2026-08-11 decision, and the one that matters most:
+    # without it the price gate is NA and the listing leaves the screen. EV =
+    # market cap (100 shares x 5) + bound 150 - cash 200 = 450; / EBIT 80.
+    repo = _FakeFactsRepo(
+        {
+            **_balance_sheet_without_debt(),
+            "LiabilitiesNoncurrent": _fy("LiabilitiesNoncurrent", 150.0),
+            "OperatingIncomeLoss": _fy("OperatingIncomeLoss", 80.0),
+            "CommonStockSharesOutstanding": _fy(
+                "CommonStockSharesOutstanding", 100.0, unit_kind="count"
+            ),
+        }
+    )
+    result = EVToEBITMetric().compute(LISTING_ID, repo, _FakeMarketRepo(price=5.0))
+    assert result is not None
+    assert abs(result.value - 450.0 / 80.0) < 1e-9
+
+
+def test_short_term_debt_share_still_refuses_the_bound() -> None:
+    # The containment that survives, and the reason it is not arbitrary: total
+    # debt is this metric's *denominator*, so a bound understates the share --
+    # the flattering direction, not the safe one. Same balance sheet, still NA.
+    repo = _FakeFactsRepo(
+        {
+            **_balance_sheet_without_debt(),
+            "LiabilitiesNoncurrent": _fy("LiabilitiesNoncurrent", 150.0),
+            "ShortTermDebt": [],
+        }
+    )
+    assert ShortTermDebtShareMetric().compute(LISTING_ID, repo) is None
