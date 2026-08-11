@@ -158,9 +158,31 @@ See [MSFT QARP Review](../research/msft-qarp-review-2026-08.md) for the audit.
 
 ## ROIC / Capital Efficiency
 
+### The one place a debt *bound* may stand in for measured debt
+
+Invested capital needs a debt leg for **every** fiscal period in its window, and providers
+null all three debt fields for a period rather than reporting a zero. One such gap voids
+the whole strict 10-year ROIC chain — removing the fabricated `LongTermDebt` on 2026-08-10
+cost the strict-10Y gates ~6,000 listings, including businesses with no borrowings at all
+(PayPal reported none in FY2015–FY2016).
+
+So `ic_mqr` / `ic_fy` / `avg_ic`, and only they, fall back to that period's
+`LiabilitiesNoncurrent` when no debt row exists. Reading the gap as zero was rejected on
+evidence: EODHD *does* emit explicit zeroes for genuinely debt-free periods (141k
+`LongTermDebt` and 88k `ShortTermDebt` rows are exactly `0`), so an absent row means
+unreported, and on a 1,457-period sample the nearest reported debt exceeded 20% of that
+period's total liabilities in 48.8% of cases.
+
+The substitution is safe here because the error direction is one-way: non-current
+liabilities bound borrowings from above, so the bound can only inflate invested capital
+and therefore only **depress** every return computed from it. It can cost a company a ROIC
+gate or a ranking place; it can never win one. No metric that reports a debt figure to a
+reader may do this — `TotalDebt` above stays measured-only, and the containment is
+test-pinned in `tests/regression/test_invested_capital_noncurrent_liabilities_bound.py`.
+
 | English Descriptive Name of the Metric | pyvalue key | How is it calculated | Why is it important in identifying quality/value stocks |
 | --- | --- | --- | --- |
-| Invested Capital (Most Recent Quarter) | `ic_mqr` | EODHD-oriented: latest quarterly `TotalDebt + TotalEquity - Cash`, with debt/equity/cash fallback chains. | Gives a direct snapshot of operating capital committed to the business. |
+| Invested Capital (Most Recent Quarter) | `ic_mqr` | EODHD-oriented: latest quarterly `TotalDebt + TotalEquity - Cash`, with debt/equity/cash fallback chains. A period carrying no debt row at all uses `LiabilitiesNoncurrent` as a documented upper bound (see above) rather than dropping the period. | Gives a direct snapshot of operating capital committed to the business. |
 | Invested Capital (Fiscal Year) | `ic_fy` | EODHD-oriented FY version of the same invested-capital formula used by `ic_mqr`. | Useful as an annual anchor for capital-efficiency analysis. |
 | Average Invested Capital | `avg_ic` | EODHD-oriented: `(IC_now + IC_same_quarter_last_year) / 2`, with strict FY fallback when quarter pairing is unavailable. | Smooths balance-sheet timing noise for return-on-capital metrics. |
 | ROIC (TTM) | `roic_ttm` | EODHD-oriented: `NOPAT_TTM / avg_ic`, where `NOPAT_TTM = EBIT_TTM * (1 - effective_tax_rate)`. | Measures current after-tax operating efficiency on invested capital. |

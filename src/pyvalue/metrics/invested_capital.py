@@ -1,6 +1,21 @@
 """Invested capital base metrics implementation.
 
 Author: Emre Tezel
+
+Invested capital is debt + equity - cash for one fiscal period, so every
+period needs all three legs. The debt leg is the fragile one: providers null
+their debt fields for a period rather than reporting a zero, and a single
+missing period breaks the strict 10-year window the ROIC persistence gates
+depend on.
+
+That is why ``_resolve_debt`` accepts ``LiabilitiesNoncurrent`` as a
+last-resort **bound** on the debt leg. Everywhere else in the codebase a bound
+is forbidden to stand in for measured debt -- see ``balance_sheet``, where
+"all three absent means debt is unknown, not zero". Invested capital is the
+one legitimate exception, and only because the error direction is safe:
+overstating invested capital *understates* every return computed from it, so a
+bound can only cost a company that deserved to pass, never manufacture one
+that did not. No metric that reports a debt figure to a reader may do this.
 """
 
 from __future__ import annotations
@@ -11,7 +26,11 @@ from typing import Optional, Sequence
 import logging
 
 from pyvalue.facts import MonetaryFact, RegionFactsRepository
-from pyvalue.metrics.balance_sheet import BalanceSheetPosition, broader_debt_reading
+from pyvalue.metrics.balance_sheet import (
+    NONCURRENT_LIABILITIES_CONCEPT,
+    BalanceSheetPosition,
+    broader_debt_reading,
+)
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import (
     MAX_FACT_AGE_DAYS,
@@ -43,6 +62,7 @@ REQUIRED_CONCEPTS = (
     SHORT_TERM_DEBT_CONCEPT,
     LONG_TERM_DEBT_CONCEPT,
     TOTAL_DEBT_CONCEPT,
+    NONCURRENT_LIABILITIES_CONCEPT,
     EQUITY_PRIMARY_CONCEPT,
     EQUITY_FALLBACK_CONCEPT,
     CASH_PRIMARY_CONCEPT,
@@ -91,6 +111,10 @@ class _InvestedCapitalBase:
         total_map = self._period_map(
             repo.monetary_facts_for_concept(listing_id, TOTAL_DEBT_CONCEPT), periods
         )
+        noncurrent_map = self._period_map(
+            repo.monetary_facts_for_concept(listing_id, NONCURRENT_LIABILITIES_CONCEPT),
+            periods,
+        )
         equity_map = self._period_map(
             repo.monetary_facts_for_concept(listing_id, EQUITY_PRIMARY_CONCEPT), periods
         )
@@ -126,6 +150,7 @@ class _InvestedCapitalBase:
                 short_debt=short_map.get(key),
                 long_debt=long_map.get(key),
                 total_debt=total_map.get(key),
+                noncurrent_liabilities=noncurrent_map.get(key),
             )
             if debt is None:
                 continue
@@ -168,6 +193,7 @@ class _InvestedCapitalBase:
         short_debt: Optional[MonetaryFact],
         long_debt: Optional[MonetaryFact],
         total_debt: Optional[MonetaryFact],
+        noncurrent_liabilities: Optional[MonetaryFact],
     ) -> Optional[_Amount]:
         # Fact *selection* is this metric's own -- one fiscal period's rows,
         # not the latest fresh ones -- but the decision between the two debt
@@ -200,15 +226,37 @@ class _InvestedCapitalBase:
             )
 
         broadest = broader_debt_reading(components, rollup)
-        if broadest is None:
-            LOGGER.warning(
-                "invested_capital: missing debt inputs for listing_id=%s on %s/%s",
-                listing_id,
-                key[0],
-                key[1],
+        if broadest is not None:
+            return _Amount(money=broadest.money, as_of=broadest.as_of)
+
+        # Nothing measured for this period. Providers null all three debt
+        # fields for a period instead of reporting a zero (EODHD does report
+        # explicit zeroes elsewhere -- 141k LongTermDebt and 88k ShortTermDebt
+        # rows are exactly 0 -- so a missing row means unreported, and reading
+        # it as zero would understate invested capital on roughly half the
+        # affected periods). One such gap anywhere in the decade voids the
+        # whole ROIC persistence chain, which cost the strict-10Y gates ~6,000
+        # listings when the fabricated LongTermDebt was removed on 2026-08-10.
+        #
+        # Non-current liabilities bound long-term borrowings from above, so
+        # substituting them can only inflate invested capital and therefore
+        # only *depress* the returns computed from it. That is why the
+        # substitution is confined to this metric: it cannot lift a listing
+        # over a ROIC gate or up the ranking, only hold it back. See the module
+        # docstring.
+        if noncurrent_liabilities is not None:
+            return _Amount(
+                money=self._money(noncurrent_liabilities, target_currency, listing_id),
+                as_of=noncurrent_liabilities.end_date,
             )
-            return None
-        return _Amount(money=broadest.money, as_of=broadest.as_of)
+
+        LOGGER.warning(
+            "invested_capital: missing debt inputs for listing_id=%s on %s/%s",
+            listing_id,
+            key[0],
+            key[1],
+        )
+        return None
 
     def _resolve_equity(
         self,
