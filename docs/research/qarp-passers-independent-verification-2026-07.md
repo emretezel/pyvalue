@@ -244,8 +244,10 @@ whether defect 1 is fixed. See `docs/providers/eodhd.md` for the rule table.
 3. **Detect cumulative-YTD cash-flow rows.** Before building a TTM window, check whether quarterly values
    increase monotonically within the fiscal year and whether Q4 equals FY; if so, difference them into
    discrete quarters or fall back to the FY row. This kills the Medistim false positive.
-4. **Guard the component-debt undercount.** In `metrics/balance_sheet.py:resolve_total_debt`, when the
-   provider rollup exceeds the component sum by more than ~1.5x, prefer the rollup (or emit NA).
+4. ~~**Guard the component-debt undercount.** In `metrics/balance_sheet.py:resolve_total_debt`, when the
+   provider rollup exceeds the component sum by more than ~1.5x, prefer the rollup (or emit NA).~~
+   **DONE 2026-08-10/11, but not as proposed** — the threshold was dropped for *broadest measured
+   wins*. See the [2026-08-11 re-run](#2026-08-11-re-run) above.
 5. **Require cash components to share a period end.** In `resolve_cash_position`, only add
    `ShortTermInvestments` to `CashAndCashEquivalents` when both rows carry the same `end_date`.
 6. **Include minority interest in EV.** The concept is already ingested; adding it fixes Christian Dior's
@@ -258,6 +260,62 @@ whether defect 1 is fixed. See `docs/providers/eodhd.md` for the rule table.
    snapshot differ by a near-integer ratio (2, 4, 5, 10) and the filing is more recent, prefer the filing.
 9. **Extend the financial-sector exclusion** to brokers/exchanges (XTB), which the owner-earnings NWC
    chain does not currently exclude.
+
+## 2026-08-11 re-run
+
+The screen was re-run over the full universe on a rebuilt debt basis and a fresh
+full-universe recompute: **121 passing listings, 84 companies after collapsing
+cross-listings**. See
+[Recognizable Names (2026-08-11)](qarp-recognizable-names-2026-08-11.md). What
+that run says about the findings above:
+
+**Fix 4 landed, and more broadly than proposed.** The >1.5x rollup heuristic was
+dropped — the components exceed the rollup on 42% of listings, so "prefer the
+rollup" trades one understatement for another. The rule is now *broadest
+measured wins*, applied in one shared function. Westports (`5246.KLSE`), the
+case that motivated this fix, no longer passes. Note the correction implied by
+`ce92a3f`: a **sixth** private debt chain in `roic_fy_series` survived the
+2026-08-10 merge and kept the old precedence until 2026-08-11, so the ROIC
+persistence gates were lease-blind for a further day.
+
+**The pence-collapse false positives are gone, but only four of the seven are
+actually repaired.** Cadence, IDEXX, KLA and Parker-Hannifin have been
+re-fetched since the 2026-07-27 ingestion fix and now carry correct prices
+(`0HS2.LSE` $340.14, `0J8P.LSE` $556.72, `0JPO.LSE` $200.15, `0KFZ.LSE`
+$987.75). **Grainger, Mettler-Toledo and Moody's have not been re-fetched since
+2026-07-17** and still hold 100x-low stored prices ($13.93, $13.09, $5.10).
+They do not pass this run, so the absence of all seven from the passer list
+overstates how much has been fixed.
+
+**Still passing, still wrong:** `3014.TW` (ITE Tech) and `MEDI.OL` (Medistim)
+both return — fixes 3 and 8 were never applied, so nothing excludes them.
+`CDI.PA` still carries the omitted-minority-interest distortion (fix 6).
+`PINFRA.MX` still passes with the mismatched cash period ends (fix 5).
+`XTB.WAR` (fix 9, broker exclusion) has left the list, but on an unrelated
+NA — not because the exclusion was implemented.
+
+**Fix 7 is now attested at scale.** Nineteen companies passed on a foreign line
+while their own home listing failed: AutoZone, Snap-on, GSK, Inditex, Paychex,
+Ulta, Pentair, Kainos, Straumann, Temenos, Recordati, Wolters Kluwer, NetEase,
+ANTA, 3SBio, Jumbo, Shoei, Apranga and Telia Lietuva. The same fundamentals
+evaluated at two venues should not disagree on a binary gate.
+
+**The classification follow-up above is incomplete.** It reports the rule set
+taking the passer list from 154 to 94 and removing the cross-listings. It does
+not: **27 of the 121 passers carry `primary_listing_status = 'unknown'`**, which
+stays screen-eligible by design, and every one checked is a cross-listing. EODHD
+returns `PrimaryTicker`, `HomeCategory` and `ISIN` all null for these lines, so
+no rule can settle them. There are 19,935 such listings in the catalog.
+
+**One new NA cluster, caused by the debt fix.** `enterprise_value` and
+`net_debt_to_ebitda` deliberately refuse the non-current-liabilities bound that
+invested capital now uses, so a listing whose latest balance sheet carries no
+debt row loses all three price arms: **5,255 listings**, and six former passers
+(`035900.KQ`, `ABS.WAR`, `BVXP.LSE`, `OLTH.AT`, `SAUCE.BK`, `XTB.WAR`). These
+are not valuation calls. Since an upper bound on debt can only raise EV and
+lower every yield, extending the bound there would be one-way safe for the
+gates — at the cost of a `net_debt_to_ebitda` figure a reader would act on.
+Open design question.
 
 ## Reading the CSV
 

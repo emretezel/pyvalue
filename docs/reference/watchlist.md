@@ -34,6 +34,21 @@ when the set changes.
 `listing_id` values are recorded so ad-hoc read-only SQL can target these rows
 without symbol joins.
 
+### Recomputed 2026-08-11
+
+All eleven were recomputed in the full-universe run of 2026-08-11, the first on
+the rebuilt debt basis (`d5d8b34`, `d2e600c`, `c24aad2`, then `71b259d`,
+`ce92a3f`). Every ROIC figure on the watchlist moved, because the ROIC FY series
+had kept a private copy of the retired components-preferred debt rule until
+`ce92a3f`. **Microsoft is now net debt +0.27x EBITDA rather than net cash** —
+the old figure omitted $78.8B of finance leases.
+
+`ADBE.US` remains the **only** watchlist name that passes QARP, at 14 of 14
+gates. `MSFT.US` is 13/14 on the price gate alone; `GOOGL.US` slipped to 12/14
+when Q2 2026's one-time investment gains pushed CFO/NI TTM to 0.76. Gate-by-gate
+detail for the nine AI names is in
+[Watchlist AI Buy Ranking, addendum 2026-08-11](../research/watchlist-ai-buy-ranking-2026-07.md#addendum-2026-08-11--every-db-table-above-is-superseded).
+
 Cloudflare (`NET.US`) joined the watchlist on 2026-08-07. It was already in the
 catalog as a `primary` US listing, so the addition was documentation only — no
 catalog row was created. It is the only watchlist name that has **never** posted
@@ -49,11 +64,13 @@ verbatim to any of them:
 --symbols MSFT.US GOOGL.US ADBE.US NVDA.US AMD.US C.US PLTR.US TSLA.US INTC.US 000660.KO NET.US
 ```
 
-## Cloudflare (NET.US) QARP profile, 2026-08-07
+## Cloudflare (NET.US) QARP profile, refreshed 2026-08-11
 
-Recorded at the time of addition, from a full pipeline run (fundamentals
-re-ingested, price refreshed, facts re-normalized with `--force`, all 93 metrics
-recomputed). Price $284.43 as of 2026-08-06; market cap $100.3B.
+First recorded on addition (2026-08-07) from a full pipeline run; **refreshed
+here against the 2026-08-11 universe recompute**, which followed the debt-basis
+rebuild of 2026-08-10/11 (see
+[Recomputed 2026-08-11](#recomputed-2026-08-11) below). Price $300.27 as of
+2026-08-07; market cap $96.4B.
 
 Cloudflare **fails QARP**, 2 gates of 14:
 
@@ -70,8 +87,8 @@ Cloudflare **fails QARP**, 2 gates of 14:
 | Debt service (6x cov or ≤1.5x) | FAIL | both arms NA (non-positive EBIT/EBITDA) |
 | No NI loss years (10Y) | FAIL | 10 of 10 |
 | Share CAGR 5Y ≤ +1% | FAIL | +2.9% (10Y: +16.6%) |
-| Price gate (OEY/EBIT/FCF yield) | FAIL | −0.14% / −0.22% / +0.36% |
-| iROIC 5Y ≥ 12% | FAIL | −2.9% |
+| Price gate (OEY/EBIT/FCF yield) | FAIL | −0.14% / −0.23% / +0.37% |
+| iROIC 5Y ≥ 12% | FAIL | −2.6% |
 | Owner-earnings CAGR 10Y ≥ 7% | NA | too few consecutive FY owner-earnings points |
 
 The NAs are **not defects**. Cloudflare has posted a GAAP loss in all ten stored
@@ -81,8 +98,8 @@ a number. QARP is built on 10-year ROIC persistence, margin floors, no-loss-year
 and owner-earnings compounding; a company that has never earned a GAAP profit is
 structurally outside what the screen selects for. The two passing gates are real
 and notable — 73% gross margin with 1.9pp of ten-year variation is elite pricing
-power. The balance sheet is also sound (`altman_z` 13.4, `current_ratio` 1.96,
-net cash: `net_debt_to_ebitda` −6.5).
+power. The balance sheet is also sound (`altman_z` 12.9, `current_ratio` 1.96,
+net cash: `net_debt_to_ebitda` −6.49).
 
 ### Known vendor caveat: non-GAAP EPS on a GAAP net income
 

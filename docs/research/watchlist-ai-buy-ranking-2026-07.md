@@ -319,27 +319,89 @@ for the gate-by-gate detail.
 A fresh ranking that includes Cloudflare would need its own memo and its own
 web-research sweep.
 
-## Addendum 2026-08-10 — this memo's MSFT valuation is superseded
+## Addendum 2026-08-11 — every DB table above is superseded
 
-Microsoft's valuation figures throughout this memo (EV/EBIT 18.8, FCF yield on
-EV 2.6%, "~20x forward", the #2-3 ranking rationale) are **stale**. They were
-computed at the 2026-07-24 close of $381.70 against pre-Q4 fundamentals. Both
-inputs have since moved:
+**All stored-metric figures in this memo — the gate matrix and the trailing
+metrics table — are stale.** They were computed on mixed 2026-07-06/07-24
+vintages against a debt basis that has since been rebuilt three times:
 
-- MSFT reported **FY26 Q4 on 2026-07-29** and rose ~31% to **$499.99** by
-  2026-08-07 — the largest single-day market-cap gain in its history.
-- On FY26 Q4 facts and the lease-adjusted EV, EV/EBIT is now **24.3x** and the
-  FCF yield on EV **1.78%**.
+- **2026-08-10** (`d5d8b34`, `d2e600c`, `c24aad2`): debt is now the *broadest
+  measured* reading of the two the provider supplies, so finance leases are in;
+  and normalization no longer files non-current liabilities under
+  `LongTermDebt`.
+- **2026-08-11** (`71b259d`, `ce92a3f`): a period carrying no debt row no
+  longer voids invested capital, and the ROIC FY series — which had kept a
+  sixth, private copy of the retired components-preferred debt rule — was
+  routed through the shared one. **Every ROIC figure below moved.**
 
-The *verdict* is unchanged and in fact reinforced — MSFT still passes 13 of 14
-QARP gates and still fails only the price gate, now by 38% on its most generous
-arm rather than by the narrower July margin. See
-[MSFT QARP Review (2026-08)](msft-qarp-review-2026-08.md) for the current
-numbers, a maximum-entry-price analysis, and a net-debt defect (finance leases
-excluded from the debt rollup) that this memo's EV figures also carry.
+The nine names were recomputed in the full-universe run of 2026-08-11 against
+the 2026-08-07 close (2026-07-27 for SK Hynix). The **narrative ranking and all
+forward/consensus figures stay at their 2026-07-29 research vintage** — they
+were sourced from the web that day and cannot be half-updated without
+contradicting themselves. Read the tables below as the current data and the
+prose above as a point-in-time opinion.
 
-The other eight names have **not** been re-checked and their figures remain at
-the 2026-07-24/29 vintage stated above.
+### Gate matrix, recomputed 2026-08-11
+
+| Gate | ADBE | MSFT | GOOGL | NVDA | AMD | HYNIX | INTC | TSLA | PLTR |
+|---|---|---|---|---|---|---|---|---|---|
+| ROIC years >12% ≥ 7/10 | pass | pass | pass | pass | FAIL | FAIL | FAIL | FAIL | NA |
+| ROIC 10Y min ≥ 7% | pass | pass | pass | pass | FAIL | FAIL | FAIL | FAIL | NA |
+| Gross margin ≥ 35% | pass | pass | pass | pass | pass | pass | pass | FAIL | pass |
+| GM 10Y std ≤ 7pp | pass | pass | pass | pass | FAIL | FAIL | FAIL | pass | NA |
+| OPM 7Y min ≥ 5% | pass | pass | pass | pass | FAIL | FAIL | FAIL | FAIL | FAIL |
+| CFO/NI TTM ≥ 0.90 | pass | pass | **FAIL** | FAIL | pass | pass | NA | pass | pass |
+| CFO/NI 10Y median ≥ 0.90 | pass | pass | pass | pass | pass | pass | pass | pass | NA |
+| Net debt/EBITDA ≤ 2.5x | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| Debt service (6x cov or ≤1.5x) | pass | pass | pass | pass | pass | pass | FAIL | pass | pass |
+| No NI loss years (10Y) | pass | pass | pass | pass | FAIL | FAIL | FAIL | FAIL | NA |
+| Share CAGR 5Y ≤ +1% | pass | pass | pass | pass | FAIL | pass | FAIL | FAIL | FAIL |
+| **Price gate** (OEY/EBIT/FCF yield) | **pass** | FAIL | FAIL | FAIL | FAIL | FAIL | FAIL | FAIL | FAIL |
+| iROIC 5Y ≥ 12% | pass | pass | pass | pass | FAIL | pass | FAIL | FAIL | pass |
+| Owner earnings CAGR ≥ 7% | pass | pass | pass | pass | pass | pass | NA | NA | NA |
+
+**Adobe still passes 14 of 14** and remains the only watchlist name that does.
+MSFT is still 13/14 on the price gate alone. Two gates changed sign against the
+July matrix:
+
+- **GOOGL now fails CFO/NI TTM (0.76 vs 0.90).** Not a debt effect — Q2 2026's
+  headline net income was inflated by one-time investment gains (the SpaceX IPO
+  markup and Anthropic's revaluation, both discussed above), so cash conversion
+  falls mechanically. The 10Y median still passes at 1.54. GOOGL is now 12/14.
+- **TSLA now fails the share-count gate** at +1.07%/yr against a +1.00% bar,
+  where the July matrix had it passing.
+
+### Selected trailing metrics, recomputed 2026-08-11
+
+Prices are the 2026-08-07 close; SK Hynix is 2026-07-27.
+
+| Metric | ADBE | MSFT | GOOGL | NVDA | AMD | HYNIX | INTC | TSLA | PLTR |
+|---|---|---|---|---|---|---|---|---|---|
+| Price | $265.21 | $499.99 | $354.30 | $223.96 | $483.36 | ₩1,816,000 | $101.65 | $328.58 | $172.01 |
+| ROIC 7Y median | 33.7% | 32.2% | 26.4% | 37.0% | 5.1% | 6.6% | 0.0% | 9.6% | 9.6% |
+| ROIC 10Y median | 29.6% | 28.9% | 20.2% | 38.5% | 11.6% | 12.4% | 11.3% | 6.7% | NA |
+| Gross margin TTM | 89.1% | 67.9% | 60.9% | 74.2% | 53.2% | 68.3% | 38.9% | 18.9% | 84.8% |
+| Net debt / EBITDA | 0.15x | **+0.27x** | −0.75x | −0.41x | −0.93x | −0.38x | 1.67x | −3.15x | −3.45x |
+| EV/EBIT | 11.8 | 24.3 | 28.7 | 33.0 | 120.3 | 16.2 | 6840 | 289 | 147 |
+| FCF yield on EV | 9.9% | 1.8% | 1.3% | 2.2% | 1.1% | 3.2% | 0.5% | 0.5% | 0.9% |
+| Owner-earnings yield on EV | 5.5% | 2.3% | 1.7% | 0.5% | 0.3% | 0.5% | −0.2% | 0.5% | 0.0% |
+| iROIC 5Y | 1.00 (cap) | 18.3% | 33.0% | 79.0% | 3.0% | 53.7% | −56.3% | 2.9% | 41.0% |
+| Piotroski F | 6 | 6 | 8 | 4 | 7 | 8 | 6 | 5 | 8 |
+
+**The sentence "all nine carry low/negative net debt except Intel" above is no
+longer true.** Microsoft is now **net debt +0.27x EBITDA**, not net cash: the
+July figure omitted $78.8B of finance-lease obligations. The other eight remain
+net cash, Intel excepted.
+
+Two other movements worth naming: **Intel's EBIT has crossed from negative to
+marginally positive**, so `ev_to_ebit` is now a finite but meaningless 6,840x
+rather than NA; and **AMD's EV/EBIT fell from 193 to 120** on earnings growth
+rather than on price (the stock rose from $429.56 to $483.36 over the window).
+
+MSFT's own review is separate and current: see
+[MSFT QARP Review (2026-08)](msft-qarp-review-2026-08.md) for the
+maximum-entry-price analysis and the finance-lease defect this memo's original
+EV figures carried.
 
 ## Method appendix
 

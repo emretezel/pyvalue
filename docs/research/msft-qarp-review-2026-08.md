@@ -128,8 +128,28 @@ reading the code turned up a second defect pushing the opposite way:
   `invested_capital`'s, so the ROIC gates and the price gates no longer read
   different balance sheets.
 
-The universe recompute has **not** been run yet, so the stored metrics
-throughout this memo still reflect the pre-fix figures.
+**Recompute completed 2026-08-11**, and the stored metrics now match this
+memo's predicted figures exactly: `net_debt_to_ebitda` **+0.268x** (was
+−0.1387), `ev_to_ebit` **24.25**, `fcf_yield_ev` **1.78%**, `oey_ev_norm`
+**2.32%**. Market cap $3,712.7B against net debt ≈ $52.0B gives EV ≈ $3,765B.
+No QARP gate flipped; MSFT remains 13 of 14 on the price gate alone.
+
+Two follow-on defects surfaced during that recompute and were fixed before it
+was accepted:
+
+- **`71b259d`** — removing the fabricated `LongTermDebt` left invested capital
+  with no debt leg for any period where the provider nulls all three debt
+  fields, and one such gap voids the strict 10-year ROIC chain. That cost
+  ~6,000 listings their ROIC persistence gates. The gap now takes that period's
+  `LiabilitiesNoncurrent` as an explicit bound, which is one-way safe: it can
+  only inflate invested capital, hence only depress a return.
+- **`ce92a3f`** — **the claim above that all five private debt chains were
+  removed was wrong.** There were six. `roic_fy_series` kept its own
+  components-preferred copy, so the entire ROIC persistence family — four of
+  QARP's fourteen gates — was still reading lease-blind debt. It now routes
+  through the shared rule. MSFT's own `roic_10y_median` moved 30.1% → 28.9% and
+  `iroic_5y` 23.5% → 18.3% as a result; neither is gated for MSFT, and both
+  gates it does face on ROIC still pass.
 
 ### Fixes as originally proposed
 
