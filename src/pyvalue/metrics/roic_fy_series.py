@@ -13,6 +13,11 @@ import logging
 import statistics
 
 from pyvalue.facts import MonetaryFact, RegionFactsRepository
+from pyvalue.metrics.balance_sheet import (
+    NONCURRENT_LIABILITIES_CONCEPT,
+    BalanceSheetPosition,
+    broader_debt_reading,
+)
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.invested_capital import (
     CASH_FALLBACK_CONCEPT,
@@ -731,6 +736,9 @@ class ROICFYSeriesCalculator:
         total_map = self._fy_period_map(
             repo.monetary_facts_for_concept(listing_id, TOTAL_DEBT_CONCEPT)
         )
+        noncurrent_map = self._fy_period_map(
+            repo.monetary_facts_for_concept(listing_id, NONCURRENT_LIABILITIES_CONCEPT)
+        )
         equity_map = self._fy_period_map(
             repo.monetary_facts_for_concept(listing_id, EQUITY_PRIMARY_CONCEPT)
         )
@@ -769,6 +777,7 @@ class ROICFYSeriesCalculator:
                 short_debt=short_map.get(key),
                 long_debt=long_map.get(key),
                 total_debt=total_map.get(key),
+                noncurrent_liabilities=noncurrent_map.get(key),
             )
             if debt is None:
                 failure_by_year.setdefault(
@@ -846,37 +855,62 @@ class ROICFYSeriesCalculator:
         short_debt: Optional[MonetaryFact],
         long_debt: Optional[MonetaryFact],
         total_debt: Optional[MonetaryFact],
+        noncurrent_liabilities: Optional[MonetaryFact],
     ) -> tuple[Optional[_AmountResult], Optional[str]]:
-        if short_debt is not None and long_debt is not None:
-            return (
-                _AmountResult(
-                    money=self._money(short_debt, listing_id, repo)
-                    + self._money(long_debt, listing_id, repo),
-                    as_of=max(short_debt.end_date, long_debt.end_date),
-                ),
-                None,
+        """Resolve one FY's debt leg: shared rule first, then the bound.
+
+        This chain was missed by the 2026-08-10 debt audit, which collapsed
+        five private copies of the debt decision into
+        ``balance_sheet.broader_debt_reading`` but left this sixth one behind.
+        It kept the retired components-preferred precedence, so the whole ROIC
+        persistence family -- four of QARP's fourteen gates -- valued invested
+        capital on a lease-blind figure while every other metric had moved to
+        the broadest measured reading.
+
+        Fact *selection* stays this module's own (one fiscal year's rows, no
+        freshness gate); only the decision is shared. The
+        ``LiabilitiesNoncurrent`` last resort matches ``invested_capital`` and
+        is safe for the same one-way reason: it can only inflate invested
+        capital, so it can only depress a ROIC, never lift one over a gate.
+        """
+
+        components: Optional[BalanceSheetPosition] = None
+        component_money: Optional[Money] = None
+        as_of_candidates: list[str] = []
+        for record in (short_debt, long_debt):
+            if record is None:
+                continue
+            component = self._money(record, listing_id, repo)
+            component_money = (
+                component if component_money is None else component_money + component
+            )
+            as_of_candidates.append(record.end_date)
+        if component_money is not None:
+            components = BalanceSheetPosition(
+                money=component_money, as_of=max(as_of_candidates)
             )
 
+        rollup: Optional[BalanceSheetPosition] = None
         if total_debt is not None:
+            rollup = BalanceSheetPosition(
+                money=self._money(total_debt, listing_id, repo),
+                as_of=total_debt.end_date,
+            )
+
+        broadest = broader_debt_reading(components, rollup)
+        if broadest is not None:
+            return _AmountResult(money=broadest.money, as_of=broadest.as_of), None
+
+        if noncurrent_liabilities is not None:
             return (
                 _AmountResult(
-                    money=self._money(total_debt, listing_id, repo),
-                    as_of=total_debt.end_date,
+                    money=self._money(noncurrent_liabilities, listing_id, repo),
+                    as_of=noncurrent_liabilities.end_date,
                 ),
                 None,
             )
 
-        one_side = short_debt or long_debt
-        if one_side is None:
-            return None, FAILURE_MISSING_INVESTED_CAPITAL_DEBT_INPUT
-
-        return (
-            _AmountResult(
-                money=self._money(one_side, listing_id, repo),
-                as_of=one_side.end_date,
-            ),
-            None,
-        )
+        return None, FAILURE_MISSING_INVESTED_CAPITAL_DEBT_INPUT
 
     def _resolve_invested_capital_single_amount(
         self,

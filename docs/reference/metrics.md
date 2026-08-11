@@ -82,8 +82,11 @@ Taking the larger is the safe direction for a value screen — understated debt 
 and manufactures a cheap-looking yield, while overstated debt only costs an opportunity.
 
 The rule lives in `balance_sheet.broader_debt_reading` and is the *only* place the choice
-is made; before 2026-08-10 five private copies disagreed, so `interest_coverage` and
-`enterprise_value` could read different debt for the same listing on the same day.
+is made; before 2026-08-10 six private copies disagreed, so `interest_coverage` and
+`enterprise_value` could read different debt for the same listing on the same day. Five were
+merged on 2026-08-10; the sixth — `roic_fy_series`, which feeds the whole ROIC persistence
+family and therefore four QARP gates — was found still on the retired components-preferred
+precedence and merged on 2026-08-11.
 `NetDebt = TotalDebt − cash`, and EV-denominated metrics use the same `TotalDebt`.
 See [MSFT QARP Review](../research/msft-qarp-review-2026-08.md) for the audit.
 
@@ -166,7 +169,8 @@ the whole strict 10-year ROIC chain — removing the fabricated `LongTermDebt` o
 cost the strict-10Y gates ~6,000 listings, including businesses with no borrowings at all
 (PayPal reported none in FY2015–FY2016).
 
-So `ic_mqr` / `ic_fy` / `avg_ic`, and only they, fall back to that period's
+So the two per-period invested-capital chains — `ic_mqr` / `ic_fy` / `avg_ic`, and the FY
+series behind every `roic_*` and `iroic_5y` metric — and only they, fall back to that period's
 `LiabilitiesNoncurrent` when no debt row exists. Reading the gap as zero was rejected on
 evidence: EODHD *does* emit explicit zeroes for genuinely debt-free periods (141k
 `LongTermDebt` and 88k `ShortTermDebt` rows are exactly `0`), so an absent row means
@@ -178,7 +182,8 @@ liabilities bound borrowings from above, so the bound can only inflate invested 
 and therefore only **depress** every return computed from it. It can cost a company a ROIC
 gate or a ranking place; it can never win one. No metric that reports a debt figure to a
 reader may do this — `TotalDebt` above stays measured-only, and the containment is
-test-pinned in `tests/regression/test_invested_capital_noncurrent_liabilities_bound.py`.
+test-pinned in `tests/regression/test_invested_capital_noncurrent_liabilities_bound.py`
+and `tests/regression/test_roic_fy_series_shares_the_debt_rule.py`.
 
 | English Descriptive Name of the Metric | pyvalue key | How is it calculated | Why is it important in identifying quality/value stocks |
 | --- | --- | --- | --- |
