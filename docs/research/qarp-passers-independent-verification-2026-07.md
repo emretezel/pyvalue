@@ -264,7 +264,7 @@ whether defect 1 is fixed. See `docs/providers/eodhd.md` for the rule table.
 ## 2026-08-11 re-run
 
 The screen was re-run over the full universe on a rebuilt debt basis and a fresh
-full-universe recompute: **121 passing listings, 84 companies after collapsing
+full-universe recompute: **129 passing listings, 90 companies after collapsing
 cross-listings**. See
 [Recognizable Names (2026-08-11)](qarp-recognizable-names-2026-08-11.md). What
 that run says about the findings above:
@@ -291,31 +291,40 @@ overstates how much has been fixed.
 both return — fixes 3 and 8 were never applied, so nothing excludes them.
 `CDI.PA` still carries the omitted-minority-interest distortion (fix 6).
 `PINFRA.MX` still passes with the mismatched cash period ends (fix 5).
-`XTB.WAR` (fix 9, broker exclusion) has left the list, but on an unrelated
-NA — not because the exclusion was implemented.
+`XTB.WAR` still passes, so **fix 9 (extend the financial-sector exclusion to
+brokers) remains open and is now load-bearing** — an intermediate run had
+dropped XTB on an unrelated NA, which would have masked it.
 
-**Fix 7 is now attested at scale.** Nineteen companies passed on a foreign line
-while their own home listing failed: AutoZone, Snap-on, GSK, Inditex, Paychex,
-Ulta, Pentair, Kainos, Straumann, Temenos, Recordati, Wolters Kluwer, NetEase,
-ANTA, 3SBio, Jumbo, Shoei, Apranga and Telia Lietuva. The same fundamentals
-evaluated at two venues should not disagree on a binary gate.
+**Fix 7 is now attested at scale.** Twenty companies passed on a foreign line
+while their own home listing failed: AutoZone, Snap-on, GSK, Fuchs, Inditex,
+Paychex, Ulta, Pentair, Kainos, Straumann, Temenos, Recordati, Wolters Kluwer,
+NetEase, ANTA, 3SBio, Jumbo, Shoei, Apranga and Telia Lietuva. The same
+fundamentals evaluated at two venues should not disagree on a binary gate.
 
 **The classification follow-up above is incomplete.** It reports the rule set
 taking the passer list from 154 to 94 and removing the cross-listings. It does
-not: **27 of the 121 passers carry `primary_listing_status = 'unknown'`**, which
+not: **32 of the 129 passers carry `primary_listing_status = 'unknown'`**, which
 stays screen-eligible by design, and every one checked is a cross-listing. EODHD
 returns `PrimaryTicker`, `HomeCategory` and `ISIN` all null for these lines, so
-no rule can settle them. There are 19,935 such listings in the catalog.
+no rule can settle them. There are 19,935 such listings in the catalog. **This
+is the largest unaddressed defect the re-run surfaced** — it is why every QARP
+run still needs a manual company-collapse pass.
 
-**One new NA cluster, caused by the debt fix.** `enterprise_value` and
-`net_debt_to_ebitda` deliberately refuse the non-current-liabilities bound that
-invested capital now uses, so a listing whose latest balance sheet carries no
-debt row loses all three price arms: **5,255 listings**, and six former passers
-(`035900.KQ`, `ABS.WAR`, `BVXP.LSE`, `OLTH.AT`, `SAUCE.BK`, `XTB.WAR`). These
-are not valuation calls. Since an upper bound on debt can only raise EV and
-lower every yield, extending the bound there would be one-way safe for the
-gates — at the cost of a `net_debt_to_ebitda` figure a reader would act on.
-Open design question.
+**The debt fix's NA cost was measured and then largely repaid.** Removing the
+fabricated `LongTermDebt` stranded ~6,000 listings' ROIC persistence gates and
+5,255 listings' EV. Both were closed by allowing `LiabilitiesNoncurrent` as an
+explicit upper bound where the error direction is one-way — inside invested
+capital (`71b259d`), then in EV and net debt (`053dcda`), since an overstated
+debt figure can only make a listing look dearer and more levered:
+
+| NA reason | after removing the fabrication | now |
+|---|---|---|
+| `roic_10y`: missing invested capital debt input | 6,054 listings | 492 |
+| `ebit_yield_ev`: missing EV debt/cash facts | 5,255 listings | 1,117 |
+| `net_debt_to_ebitda`: missing net debt inputs | 1,546 listings | 221 |
+
+`short_term_debt_share` still refuses the bound and still resolves NA, because
+total debt is its denominator there and a bound would understate the share.
 
 ## Reading the CSV
 
