@@ -313,7 +313,7 @@ persistence, margin floors, and owner-earnings compounding — inapplicable rath
 than merely weak. Its two genuine strengths (73.3% gross margin, 1.9pp of
 ten-year GM variation) are pricing-power evidence, not evidence of returns on
 capital. See the
-[QARP profile](../reference/watchlist.md#cloudflare-netus-qarp-profile-2026-08-07)
+[QARP profile](../reference/watchlist.md#cloudflare-netus-qarp-profile-refreshed-2026-08-11)
 for the gate-by-gate detail.
 
 A fresh ranking that includes Cloudflare would need its own memo and its own
@@ -402,6 +402,129 @@ MSFT's own review is separate and current: see
 [MSFT QARP Review (2026-08)](msft-qarp-review-2026-08.md) for the
 maximum-entry-price analysis and the finance-lease defect this memo's original
 EV figures carried.
+
+## Addendum 2026-08-26 — Broadcom (AVGO.US) joins the watchlist, assessed on this framework
+
+`AVGO.US` (listing 54870) was added to the
+[anchor watchlist](../reference/watchlist.md) on 2026-08-26 — the twelfth name,
+and the piece of the AI trade the original nine covered only by proxy: custom
+AI accelerators (XPUs) and the Ethernet networking that stitches the clusters
+together, plus a ~$28B-run-rate infrastructure-software annuity (VMware).
+Unlike the Cloudflare addendum above, this one **does** assess the newcomer on
+the memo's quality/price/growth framework. The July tables are still not
+reopened; two data vintages are mixed below, kept explicit:
+
+- **Trailing/gate data**: the stored 2026-08-11 full-universe metric run — the
+  same vintage as the recomputed tables in the 2026-08-11 addendum, so those
+  columns are directly comparable. Fundamentals through Q2 FY2026 (quarter
+  ended 2026-05-03); price the 2026-08-07 close ($427.76, market cap $2.035T).
+- **Forward/context data**: web research run 2026-08-26. Broadcom closed
+  2026-08-25 at **$356.74 (~$1.70T)** — down ~17% from the DB snapshot in the
+  August AI repricing and ~28% below its 52-week high ($495.00) — so the DB's
+  price-linked multiples overstate today's price by roughly that margin. The
+  other nine names' forward figures sit at their 2026-07-29 vintage and are
+  **not** directly comparable to Broadcom's.
+
+### The QARP verdict: fails, 6 of 14 — a fourth failure pattern
+
+Gate-by-gate detail with values is in the watchlist's
+[Broadcom QARP profile](../reference/watchlist.md#broadcom-avgous-qarp-profile-2026-08-26).
+The memo's taxonomy above has three failure patterns — price-only (MSFT,
+GOOGL), near-quality (NVDA, Hynix), broad (AMD, INTC, TSLA, PLTR). Broadcom is
+none of them. Call the fourth **the serial-acquirer decade**: every quality
+failure traces to purchase accounting rather than operating economics. The one
+loss year (FY2016, −$1.74B) is the Avago–Broadcom merger-charge year; ROIC
+clears 12% in only 4 of 10 years (10Y min −1.3%) because NOPAT is measured
+against a goodwill-swollen ~$130B average invested capital; the 8.0pp of GM
+"instability" is a monotonic *climb* from 44.9% (FY2016) to 67.8% (FY2025) as
+the mix shifted to software and deal amortisation rolled off; the +2.5%/yr
+share drift is VMware's part-stock consideration plus SBC. Meanwhile the cash
+gates pass emphatically — CFO/NI 10Y median 2.04, owner-earnings CAGR 23.9%,
+iROIC 18.3%, net debt 1.09x EBITDA thirty months after the $69B half-cash
+VMware close — all fourteen criteria are computable (no other non-passer here
+manages that), and ROIC TTM is 24.3%: the acquired capital is earning through.
+The record is scar tissue, not weakness, and QARP declines to look past it by
+design. The price gate, though, fails on current economics, not history:
+EV/EBIT 63x and a 1.6% FCF yield on EV at the 08-07 price (≈53x / ≈1.9% at
+08-25).
+
+### Selected trailing metrics (2026-08-11 vintage, comparable to the table above)
+
+| Metric | AVGO |
+|---|---|
+| Price | $427.76 |
+| ROIC 7Y median | 12.4% |
+| ROIC 10Y median | 9.4% |
+| Gross margin TTM | 67.0% |
+| Net debt / EBITDA | 1.09x |
+| EV/EBIT | 63.1 |
+| FCF yield on EV | 1.6% |
+| Owner-earnings yield on EV | 0.9% |
+| iROIC 5Y | 18.3% |
+| Piotroski F | 7 |
+
+Rows the gate matrix hides: operating margin TTM **43.7%**, FCF margin TTM
+**43.4%**, revenue TTM ~$75.5B (+32%), revenue CAGR 10Y 25.1%, Altman Z 14.6.
+On TTM margins this sits with NVIDIA at the top of the watchlist — run on a
+balance sheet whose tangible book is ≈ −$38B, which is Hock Tan's acquisition
+model working as intended.
+
+### The forward story (researched 2026-08-26): the largest committed AI backlog outside Nvidia
+
+Q2 FY2026 (ended 05-03, reported 06-03): revenue **$22.2B +48%**, adjusted
+EBITDA $15.2B (**69% of revenue**), FCF $10.3B (46%), GAAP net income $9.3B;
+semiconductors $15.0B / infrastructure software $7.2B. **AI semiconductor
+revenue $10.8B, +143% YoY, against >$30B of AI bookings taken in the
+quarter.** Guidance: Q3 revenue ~$29.4B (+84%) with AI at ~$16.0B (+200%+);
+FY2026 AI revenue ~$56B (+~180% on FY2025's ~$20B); FY2027 AI revenue **"in
+excess of $100B" reiterated** — six XPU customers, ~10GW of visibility: Google
+(Ironwood TPU), Meta (MTIA), OpenAI, Anthropic (1GW ramping 2026, 3+GW
+expected 2027), and two unnamed. Consensus (stockanalysis.com / S&P Global,
+Aug 2026) underwrites the guide essentially in full — FY2026 revenue $106.1B
+(+66%) / EPS $11.63, FY2027 revenue $173.4B (+63%) / EPS $19.50 — so at
+$356.74 the stock stands at **~30.7x FY26E and ~18.3x FY27E**. Street: Strong
+Buy (37 of 49 ratings), average target $526 (median $527.50, range $216–675);
+TD Cowen reiterated Buy/$500 in late August.
+
+The cracks the August tape traded on: the **OpenAI ramp hit an $18B financing
+standoff** (reported 05-07: Broadcom will finance initial production only if
+Microsoft commits to ~40% of output, and Microsoft and OpenAI are deadlocked
+over data-center design; Tan says the other five ramps cover nine of the ten
+gigawatts). BofA's $370B AI-debt note knocked the stock −6% on 08-14 — the
+customers debt-financing the capex **are** Broadcom's backlog, so the
+circular-financing worry that hit NVDA in July attaches here too. AI must
+supply ~72% of Q3's sequential revenue growth; custom XPUs carry lower gross
+margin than networking, so adjusted-EBITDA margin is guided down a point
+(69% → ~68%) and the street frets about mix. The franchises funding the
+patience carry their own risks: VMware's perpetual-to-subscription conversion
+(reported 5–10x price increases, a CISPE antitrust complaint in Brussels,
+churn risk as multi-year renewals come due) and China/BIS export exposure.
+Above all, **six customers**, two of which (Google, Meta) could cancel a
+roadmap with a single in-housing decision. Q3 FY2026 prints **2026-09-02**,
+days after this addendum.
+
+### Where it slots: 4–5, beside NVIDIA — the same bet in backlog form
+
+At ~18.3x FY2027 consensus Broadcom optically undercuts even NVDA's ~21x from
+July, but the periods differ: NVDA's multiple was on its current fiscal year
+(≈ calendar 2026), where Broadcom stands at ~30.7x FY26E — it is the *extra*
+year of +64% consensus growth that closes the gap, and that consensus **is**
+the guide. Granting it in full, today's ~$1.75T EV is ≈15x FY27E adjusted
+EBITDA: the price gate cleared only by prepaying the entire >$100B ramp before
+it ships. QARP's trailing lens (63x EV/EBIT) and the forward lens disagree by
+4x — the widest such gap on the watchlist. So the placement mirrors NVIDIA's,
+one notch back on certainty-per-gate and one notch forward on contract cover:
+**alongside NVDA at 4–5**. Prefer NVDA for the cleaner decade (12/14 gates,
+ROIC 10Y median 38.5%) and merchant-market upside; prefer AVGO for multi-year
+design-win lock-in, six buyers instead of a market, and the software annuity —
+accepting concentration risk NVDA does not carry and a GAAP record QARP will
+keep failing for years. Decisively ahead of AMD (a challenger at ~36x FY27
+hoping for share Broadcom already holds under contract) and PLTR (~59x FY27);
+behind ADBE and the platform pair on certainty per dollar. Against Hynix at #5
+it is the opposite wager — Hynix cheap on earnings that may halve, AVGO dear
+on earnings contracted to double — and which mis-prices worse is the cycle
+call this memo does not make. Like every name here except Adobe, it is a
+watchlist stock, not a QARP pass: the screen's verdict stands.
 
 ## Method appendix
 
