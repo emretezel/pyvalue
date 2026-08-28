@@ -47,8 +47,9 @@ the old figure omitted $78.8B of finance leases.
 `ADBE.US` remains the **only** watchlist name that passes QARP, at 14 of 14
 gates. `MSFT.US` is 13/14 on the price gate alone; `GOOGL.US` slipped to 12/14
 when Q2 2026's one-time investment gains pushed CFO/NI TTM to 0.76. Gate-by-gate
-detail for the nine AI names is in
-[Watchlist AI Buy Ranking, addendum 2026-08-11](../research/watchlist-ai-buy-ranking-2026-07.md#addendum-2026-08-11--every-db-table-above-is-superseded).
+detail for all twelve names is in the
+[Watchlist Buy Ranking](../research/watchlist-buy-ranking.md), which is
+maintained as a latest snapshot.
 
 Cloudflare (`NET.US`) joined the watchlist on 2026-08-07. It was already in the
 catalog as a `primary` US listing, so the addition was documentation only — no
@@ -67,9 +68,8 @@ no compute was needed. It **fails QARP, 6 gates of 14, with all fourteen
 criteria computable — zero NAs**; the failures are purchase-accounting scar
 tissue from a decade of serial acquisition rather than operating weakness. See
 [Broadcom's QARP profile](#broadcom-avgous-qarp-profile-2026-08-26) below, and
-the ranking memo's
-[2026-08-26 addendum](../research/watchlist-ai-buy-ranking-2026-07.md#addendum-2026-08-26--broadcom-avgous-joins-the-watchlist-assessed-on-this-framework)
-for the forward story and where it slots among the AI names.
+the [Watchlist Buy Ranking](../research/watchlist-buy-ranking.md) for the
+forward story and where it slots among the watchlist names.
 
 ## Paste-ready scope line
 

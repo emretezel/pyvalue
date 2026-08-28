@@ -7,12 +7,13 @@ and give the pro/con case for adding it. A follow-up asked for a concrete
 **maximum entry price** and the specific statement lines that would change the
 verdict.
 
-This memo supersedes the MSFT rows of the
-[Watchlist AI Buy Ranking (2026-07)](watchlist-ai-buy-ranking-2026-07.md) for
-valuation purposes. That memo's MSFT figures (EV/EBIT 18.8, FCF yield on EV
-2.6%) were computed on a 2026-07-24 price of $381.70 against pre-Q4
-fundamentals. **Both inputs have since moved materially** — see
-[Section 1](#1-what-changed-since-the-july-memo).
+This memo superseded the MSFT rows of the July 2026 vintage of the
+[Watchlist Buy Ranking](watchlist-buy-ranking.md) for valuation purposes. That
+vintage's MSFT figures (EV/EBIT 18.8, FCF yield on EV 2.6%) were computed on a
+2026-07-24 price of $381.70 against pre-Q4 fundamentals. **Both inputs had
+moved materially by this memo's date** — see
+[Section 1](#1-what-changed-since-the-july-memo). (The ranking document is now
+maintained as a latest snapshot and carries figures newer than this memo's.)
 
 Data vintages, kept explicit:
 
