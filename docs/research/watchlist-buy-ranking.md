@@ -10,15 +10,16 @@ memo with its three addendums sits under the old path
 `docs/research/watchlist-ai-buy-ranking-2026-07.md`, ending at commit
 `52a5699`.
 
-**Snapshot date: 2026-08-28.**
+**Snapshot date: 2026-08-28 (Apple inserted 2026-09-26).**
 
 The standing question, first posed by the author in July 2026: across the
 watchlist, which names are the better buys on **quality**, **price**, and
 **future growth prospects** — anchored by what the primary QARP screen
 (`screeners/quality_reasonable_price_primary.yml`) says about each?
 
-Scope: **all twelve watchlist names**, including the two the July memo
-excluded or deferred. Citigroup is a financial, not an AI name; QARP
+Scope: **all thirteen watchlist names**, including the two the July memo
+excluded or deferred and Apple, which joined the watchlist on 2026-09-26.
+Citigroup is a financial, not an AI name; QARP
 structurally cannot screen banks (the owner-earnings gates need current
 assets/liabilities lines financial issuers do not report), so it is ranked on
 bank-appropriate lenses and its corporate-shaped table rows carry caveats.
@@ -39,6 +40,12 @@ Two data vintages, kept explicit throughout:
   sweeps; consensus figures mostly stockanalysis.com / S&P Global unless
   noted). Prices are the **2026-08-27 US close**; SK Hynix is the
   **2026-08-28 Seoul close** (₩1,653,000).
+- **Apple (AAPL.US)**, inserted 2026-09-26: its trailing rows come from the
+  same 2026-08-11 run (facts through Q3 FY2026, price the 2026-08-07 close
+  of $313.33), but its forward layer is a **2026-09-26 sweep at the
+  2026-09-25 close ($341.07)**. The other twelve forward layers were left at
+  2026-08-28 rather than refreshed; where the month's drift matters for the
+  comparison it is said so.
 
 ## QARP gate matrix (stored metrics, 2026-08-11 run)
 
@@ -46,39 +53,44 @@ Gate-by-gate evaluation of the screen's 14 criteria against stored metrics
 (`pass`/`FAIL`/`NA`; an NA is a fail for the screen but shown distinctly).
 Columns are in ranking order.
 
-| Gate | ADBE | GOOGL | MSFT | NVDA | AVGO | HYNIX | C | PLTR | AMD | INTC | NET | TSLA |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| ROIC years >12% ≥ 7/10 | pass | pass | pass | pass | FAIL | FAIL | FAIL | NA | FAIL | FAIL | NA | FAIL |
-| ROIC 10Y min ≥ 7% | pass | pass | pass | pass | FAIL | FAIL | FAIL | NA | FAIL | FAIL | NA | FAIL |
-| Gross margin ≥ 35% | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | FAIL |
-| GM 10Y std ≤ 7pp | pass | pass | pass | pass | FAIL | FAIL | FAIL | NA | FAIL | FAIL | pass | pass |
-| OPM 7Y min ≥ 5% | pass | pass | pass | pass | pass | FAIL | pass | FAIL | FAIL | FAIL | FAIL | FAIL |
-| CFO/NI TTM ≥ 0.90 | pass | FAIL | pass | FAIL | pass | pass | FAIL | pass | pass | NA | NA | pass |
-| CFO/NI 10Y median ≥ 0.90 | pass | pass | pass | pass | pass | pass | FAIL | NA | pass | pass | NA | pass |
-| Net debt/EBITDA ≤ 2.5x | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | NA | pass |
-| Debt service (6x cov or ≤1.5x) | pass | pass | pass | pass | pass | pass | pass | pass | pass | FAIL | FAIL | pass |
-| No NI loss years (10Y) | pass | pass | pass | pass | FAIL | FAIL | FAIL | NA | FAIL | FAIL | FAIL | FAIL |
-| Share CAGR 5Y ≤ +1% | pass | pass | pass | pass | FAIL | pass | pass | FAIL | FAIL | FAIL | FAIL | FAIL |
-| **Price gate** (OEY/EBIT/FCF yield) | pass | FAIL | FAIL | FAIL | FAIL | FAIL | pass | FAIL | FAIL | FAIL | FAIL | FAIL |
-| iROIC 5Y ≥ 12% | pass | pass | pass | pass | pass | pass | FAIL | pass | FAIL | FAIL | FAIL | FAIL |
-| Owner-earnings CAGR ≥ 7% | pass | pass | pass | pass | pass | pass | NA | NA | pass | NA | NA | NA |
-| **Gates passed** | **14/14** | 12/14 | 13/14 | 12/14 | 8/14 | 8/14 | 6/14 | 5/14 | 6/14 | 3/14 | 2/14 | 5/14 |
+| Gate | ADBE | GOOGL | MSFT | NVDA | AVGO | HYNIX | AAPL | C | PLTR | AMD | INTC | NET | TSLA |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| ROIC years >12% ≥ 7/10 | pass | pass | pass | pass | FAIL | FAIL | pass | FAIL | NA | FAIL | FAIL | NA | FAIL |
+| ROIC 10Y min ≥ 7% | pass | pass | pass | pass | FAIL | FAIL | pass | FAIL | NA | FAIL | FAIL | NA | FAIL |
+| Gross margin ≥ 35% | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | FAIL |
+| GM 10Y std ≤ 7pp | pass | pass | pass | pass | FAIL | FAIL | pass | FAIL | NA | FAIL | FAIL | pass | pass |
+| OPM 7Y min ≥ 5% | pass | pass | pass | pass | pass | FAIL | pass | pass | FAIL | FAIL | FAIL | FAIL | FAIL |
+| CFO/NI TTM ≥ 0.90 | pass | FAIL | pass | FAIL | pass | pass | pass | FAIL | pass | pass | NA | NA | pass |
+| CFO/NI 10Y median ≥ 0.90 | pass | pass | pass | pass | pass | pass | pass | FAIL | NA | pass | pass | NA | pass |
+| Net debt/EBITDA ≤ 2.5x | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | NA | pass |
+| Debt service (6x cov or ≤1.5x) | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | FAIL | FAIL | pass |
+| No NI loss years (10Y) | pass | pass | pass | pass | FAIL | FAIL | pass | FAIL | NA | FAIL | FAIL | FAIL | FAIL |
+| Share CAGR 5Y ≤ +1% | pass | pass | pass | pass | FAIL | pass | pass | pass | FAIL | FAIL | FAIL | FAIL | FAIL |
+| **Price gate** (OEY/EBIT/FCF yield) | pass | FAIL | FAIL | FAIL | FAIL | FAIL | FAIL | pass | FAIL | FAIL | FAIL | FAIL | FAIL |
+| iROIC 5Y ≥ 12% | pass | pass | pass | pass | pass | pass | pass | FAIL | pass | FAIL | FAIL | FAIL | FAIL |
+| Owner-earnings CAGR ≥ 7% | pass | pass | pass | pass | pass | pass | pass | NA | NA | pass | NA | NA | NA |
+| **Gates passed** | **14/14** | 12/14 | 13/14 | 12/14 | 8/14 | 8/14 | 13/14 | 6/14 | 5/14 | 6/14 | 3/14 | 2/14 | 5/14 |
 
 **Adobe passes 14 of 14 and remains the only QARP pass on the watchlist.**
 The only other name clearing the price gate is Citigroup, on a 9.4% trailing
 EBIT yield — a number whose EV construction means little for a bank (see its
-entry). NVDA's TTM cash-conversion miss (0.79) is the documented
-Blackwell-ramp working-capital artifact (10Y median 0.97 passes); GOOGL's
-(0.76) is the one-time SpaceX/Anthropic investment gains inflating net income
-(10Y median 1.54 passes). Matrix verified against
-`pyvalue report-screen-failures` on the same data: 1/12 full passers, and all
-fourteen per-criterion fallout counts reconcile.
+entry). Apple, inserted from the same run, is 13/14 on the price gate alone —
+the MSFT shape, every arm roughly half the bar, with all fourteen criteria
+computable and every input reconciled to its SEC filings (see its
+[profile](../reference/watchlist.md#apple-aaplus-qarp-profile-2026-09-26)).
+NVDA's TTM cash-conversion miss (0.79) is the documented Blackwell-ramp
+working-capital artifact (10Y median 0.97 passes); GOOGL's (0.76) is the
+one-time SpaceX/Anthropic investment gains inflating net income (10Y median
+1.54 passes). Matrix verified against `pyvalue report-screen-failures` on the
+same data: 1/13 full passers, and all fourteen per-criterion fallout counts
+reconcile.
 
 ### Five failure patterns
 
-1. **Price-only — MSFT, and effectively GOOGL and NVDA.** MSFT fails the
-   price gate alone. GOOGL and NVDA each add one TTM cash-conversion artifact
-   (above) that their 10-year medians contradict; quality is not in question.
+1. **Price-only — MSFT and AAPL, and effectively GOOGL and NVDA.** MSFT and
+   AAPL fail the price gate alone. GOOGL and NVDA each add one TTM
+   cash-conversion artifact (above) that their 10-year medians contradict;
+   quality is not in question.
 2. **Cyclicality-shaped — SK Hynix.** Every failure is a memory-cycle gate
    (one loss year, GM std 17.9pp, ROIC 10Y min −8.4%) plus a price gate
    measured at a pre-crash price. QARP punishing cyclicality by design.
@@ -104,43 +116,52 @@ fourteen per-criterion fallout counts reconcile.
 
 Prices are the 2026-08-07 close (SK Hynix 2026-07-27 — pre-crash).
 
-| Metric | ADBE | GOOGL | MSFT | NVDA | AVGO | HYNIX | C | PLTR | AMD | INTC | NET | TSLA |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| Price (DB) | $265.21 | $354.30 | $499.99 | $223.96 | $427.76 | ₩1,816,000 | $135.00 | $172.01 | $483.36 | $101.65 | $300.27 | $328.58 |
-| Market cap (DB) | $105.4B | $4.36T | $3.71T | $5.42T | $2.04T | ₩1,289T | $226.4B | $395.7B | $789.1B | $512.7B | $96.4B | $1.30T |
-| ROIC TTM | 53.9% | 22.4% | 25.6% | 99.8% | 24.3% | 49.2% | 4.3% | 39.4% | 8.8% | 0.0% | NA | 4.2% |
-| ROIC 7Y median | 33.7% | 26.4% | 32.2% | 37.0% | 12.4% | 6.6% | 2.9% | NA | 5.1% | 0.0% | −7.1% | 9.6% |
-| ROIC 10Y median | 29.6% | 20.2% | 28.9% | 38.5% | 9.4% | 12.4% | 3.6% | NA | 11.6% | 11.3% | NA | 6.7% |
-| Gross margin TTM | 89.1% | 60.9% | 67.9% | 74.1% | 67.0% | 68.3% | 54.6% | 84.8% | 53.2% | 38.9% | 73.3% | 18.9% |
-| Operating margin TTM | 36.1% | 33.1% | 46.8% | 64.0% | 43.7% | 58.6% | 16.1% | 42.8% | 15.7% | 0.1% | −9.3% | 4.2% |
-| FCF margin TTM | 42.2% | 11.9% | 20.2% | 47.0% | 43.4% | 30.8% | −23.1% | 54.6% | 20.3% | 5.0% | 15.3% | 5.6% |
-| Revenue CAGR 10Y | 17.4% | 18.3% | 13.8% | 45.7% | 25.1% | 17.9% | 6.7% | NA | 24.1% | −0.5% | NA | 37.1% |
-| Net debt / EBITDA | 0.15x | −0.75x | 0.27x | −0.41x | 1.09x | −0.38x | 1.29x | −3.45x | −0.93x | 1.67x | NA | −3.15x |
-| EV/EBIT | 11.8 | 28.6 | 24.3 | 33.0 | 63.1 | 16.2 | 10.6 | 147 | 120 | 6840 | NA | 289 |
-| Trailing P/E¹ | 11.6 | 17.8² | 27.9 | 38.3 | 52.6 | 17.2 | 13.9 | 143 | 87.2 | 105 | 448 | 189 |
-| FCF yield on EV | 9.9% | 1.3% | 1.8% | 2.2% | 1.6% | 3.2% | −13.5% | 0.9% | 1.1% | 0.5% | 0.4% | 0.5% |
-| Owner-earnings yield on EV | 5.4% | 1.7% | 2.3% | 0.5% | 0.9% | 0.5% | 3.4% | 0.0% | 0.3% | −0.2% | −0.1% | 0.4% |
-| iROIC 5Y | 1.00 (cap) | 33.0% | 18.3% | 79.0% | 18.3% | 53.7% | 1.5% | 41.0% | 3.0% | −56.3% | −2.6% | 2.9% |
-| Share count CAGR 5Y | −3.5% | −2.0% | −0.3% | −0.7% | +2.5% | +0.7% | −3.5% | +6.3% | +6.1% | +4.6% | +2.9% | +1.1% |
-| Piotroski F | 6 | 8 | 6 | 4 | 7 | 8 | 6 | 8 | 7 | 6 | 4 | 5 |
+| Metric | ADBE | GOOGL | MSFT | NVDA | AVGO | HYNIX | AAPL | C | PLTR | AMD | INTC | NET | TSLA |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Price (DB) | $265.21 | $354.30 | $499.99 | $223.96 | $427.76 | ₩1,816,000 | $313.33 | $135.00 | $172.01 | $483.36 | $101.65 | $300.27 | $328.58 |
+| Market cap (DB) | $105.4B | $4.36T | $3.71T | $5.42T | $2.04T | ₩1,289T | $4.57T | $226.4B | $395.7B | $789.1B | $512.7B | $96.4B | $1.30T |
+| ROIC TTM | 53.9% | 22.4% | 25.6% | 99.8% | 24.3% | 49.2% | 90.3% | 4.3% | 39.4% | 8.8% | 0.0% | NA | 4.2% |
+| ROIC 7Y median | 33.7% | 26.4% | 32.2% | 37.0% | 12.4% | 6.6% | 64.6% | 2.9% | NA | 5.1% | 0.0% | −7.1% | 9.6% |
+| ROIC 10Y median | 29.6% | 20.2% | 28.9% | 38.5% | 9.4% | 12.4% | 51.8% | 3.6% | NA | 11.6% | 11.3% | NA | 6.7% |
+| Gross margin TTM | 89.1% | 60.9% | 67.9% | 74.1% | 67.0% | 68.3% | 48.7% | 54.6% | 84.8% | 53.2% | 38.9% | 73.3% | 18.9% |
+| Operating margin TTM | 36.1% | 33.1% | 46.8% | 64.0% | 43.7% | 58.6% | 33.2% | 16.1% | 42.8% | 15.7% | 0.1% | −9.3% | 4.2% |
+| FCF margin TTM | 42.2% | 11.9% | 20.2% | 47.0% | 43.4% | 30.8% | 29.3% | −23.1% | 54.6% | 20.3% | 5.0% | 15.3% | 5.6% |
+| Revenue CAGR 10Y | 17.4% | 18.3% | 13.8% | 45.7% | 25.1% | 17.9% | 5.9% | 6.7% | NA | 24.1% | −0.5% | NA | 37.1% |
+| Net debt / EBITDA | 0.15x | −0.75x | 0.27x | −0.41x | 1.09x | −0.38x | 0.13x⁴ | 1.29x | −3.45x | −0.93x | 1.67x | NA | −3.15x |
+| EV/EBIT | 11.8 | 28.6 | 24.3 | 33.0 | 63.1 | 16.2 | 29.7 | 10.6 | 147 | 120 | 6840 | NA | 289 |
+| Trailing P/E¹ | 11.6 | 17.8² | 27.9 | 38.3 | 52.6 | 17.2 | 36.4 | 13.9 | 143 | 87.2 | 105 | 448 | 189 |
+| FCF yield on EV | 9.9% | 1.3% | 1.8% | 2.2% | 1.6% | 3.2% | 3.0% | −13.5% | 0.9% | 1.1% | 0.5% | 0.4% | 0.5% |
+| Owner-earnings yield on EV | 5.4% | 1.7% | 2.3% | 0.5% | 0.9% | 0.5% | 2.1% | 3.4% | 0.0% | 0.3% | −0.2% | −0.1% | 0.4% |
+| iROIC 5Y | 1.00 (cap) | 33.0% | 18.3% | 79.0% | 18.3% | 53.7% | 533%³ | 1.5% | 41.0% | 3.0% | −56.3% | −2.6% | 2.9% |
+| Share count CAGR 5Y | −3.5% | −2.0% | −0.3% | −0.7% | +2.5% | +0.7% | −2.5% | −3.5% | +6.3% | +6.1% | +4.6% | +2.9% | +1.1% |
+| Piotroski F | 6 | 8 | 6 | 4 | 7 | 8 | 8 | 6 | 8 | 7 | 6 | 4 | 5 |
 
 ¹ 1 / earnings yield on EODHD's *adjusted* EPS series — non-GAAP for
 heavy-SBC/amortisation issuers, so NET (448x on +$0.67 EPS against a GAAP
 loss), AVGO (52.6x vs ≈$6.0 GAAP diluted), and INTC are flattered; the
-vendor caveat is recorded in the watchlist profiles.
+vendor caveat is recorded in the watchlist profiles. AAPL's runs the other
+way (vendor TTM EPS $8.61 vs a filed $8.71; 36.0x on the filing).
 ² Deflated, not flattered: the denominator carries GOOGL's one-time
 investment gains; the core trailing multiple is materially higher.
+³ Not the 1.00 cap: EODHD's lease-inclusive FY2025 debt rollup measures a
+small positive five-year change in invested capital, so the ratio is a
+literal $55.6B of new NOPAT on $10.4B of new capital. On a lease-consistent
+basis the capital *shrank* and the metric would read the cap. Pass either way
+(profile).
+⁴ pyvalue's cash scope: cash plus *current* marketable securities. Apple's
+$84B of non-current marketable securities sit outside the chain; on the
+company's own basis it is $62B net cash.
 
 MSFT is net debt +0.27x EBITDA (finance leases in, since the 2026-08-10 debt
-rebuild), not net cash; every other name except INTC (1.67x), AVGO (1.09x)
-and C is net cash. C's FCF rows and EV multiples are bank-noise — read its
-entry, not this table.
+rebuild), not net cash, and AAPL reads +0.13x on the cash scope in note ⁴;
+every other name except INTC (1.67x), AVGO (1.09x) and C is net cash. C's FCF
+rows and EV multiples are bank-noise — read its entry, not this table.
 
 ## The ranking
 
-Prices below are 2026-08-27 closes (SK Hynix 2026-08-28 Seoul close).
-Consensus multiples are computed at those prices; fiscal-year labels are per
-company. The confidence ordering and the expected-return ordering still
+Prices below are 2026-08-27 closes (SK Hynix 2026-08-28 Seoul close; Apple
+the 2026-09-25 close of its own sweep date). Consensus multiples are computed
+at those prices; fiscal-year labels are per company. The confidence ordering and the expected-return ordering still
 diverge at the top: GOOGL/MSFT are the higher-*certainty* businesses; Adobe
 ranks first because at less than half their multiple its return does not
 depend on multiple persistence, only on the disruption bear case being wrong.
@@ -275,7 +296,62 @@ Q1-2026) basis is ≈6.8% — the price arm would clear again — while the
 cyclicality gates keep failing by design. Highest torque in both
 directions; a sizing decision, not a conviction decision. Q3 prints 10-29.
 
-### 7. Citigroup — nothing to do with AI, everything to do with getting paid
+### 7. Apple — the other 13-of-14, at the dearest multiple per growth point on the list
+
+$341.07 (2026-09-25, a record close; +8.9% since the DB's 08-07 price, +8.4%
+since this snapshot's 08-27 price date, +40% off the January low of $243),
+~$4.98T. **Now run by John Ternus** — CEO since 09-01, Tim Cook Executive
+Chair — with the first foldable iPhone shipping in October.
+
+- **Quality**: 13/14 QARP gates, tied with MSFT as the best non-passer, with
+  every criterion computable and every input reconciled to SEC filings. Ten
+  of ten ROIC years above 12% (worst year 21.8%), a decade of gross margin
+  inside a 3.3pp band while climbing from 39% to 47%, operating cash flow
+  never below 0.99x net income in any of the last ten years (median 1.26x),
+  and a share count shrinking 2.5%/yr on $82B of trailing buybacks. The highest-certainty cash
+  machine on the list alongside MSFT — and, unlike MSFT, one that is not
+  converting itself into a capital-heavy business: capex is ~2% of revenue.
+- **Price**: the sole failing gate, and it fails all three arms by roughly
+  half — trailing EBIT yield 3.4%, FCF yield 3.0%, normalised owner-earnings
+  yield 2.1% at the DB price ($313), each ~8% lower again at $341
+  (3.1% / 2.7% / 2.0%). **~38.6x FY26 / ~35.6x FY27** consensus EPS ($8.83 /
+  $9.59) — ten multiple points above MSFT, twelve above GOOGL, for a fraction
+  of their growth. The street average target ($328–340) sits at or below the
+  price; the rating is a "Moderate Buy" with sells from Jefferies ($264) and
+  Neutrals from UBS ($296) and Moffett ($304) against $380–400 from Evercore,
+  Loop, TD Cowen and Wedbush.
+- **Growth**: the crux and the weak leg. FY27 consensus is **revenue
+  +10.5%, EPS +8.6%**, after an FY26 (+14.8% / +18.4%) flattered by tariff
+  refunds and a strong iPhone 17 cycle. The Q3 FY26 print (07-30) was a June
+  record on every line — revenue $109.4B **+16.4%**, iPhone +21.7%, Greater
+  China +22.4%, Services +12.1%, EPS $2.02 +29% (≈$0.11 of it IEEPA-refund)
+  — and the stock still fell **7.4% the next day** on an FQ4 guide of +9–11%
+  (street ~12%), gross margin guided down to 47–48%, "very significant"
+  advanced-node supply constraints and rising memory costs. The 09-09 event
+  brought the $1,199 iPhone 18 Pro (+$100) and the **first foldable, iPhone
+  Duo at $1,999–3,199** (ships 10-23); the early read-through is mixed —
+  shorter Pro lead times and one sell-side build cut in week one, lengthening
+  lead times in week two. iOS 27 with the Gemini-based Siri AI shipped 09-14:
+  Apple's AI story is distribution and pricing power, not a capex race.
+- **Overhangs**: Section 301 forced-labor tariffs since 07-24 (10% India /
+  12.5% China-Vietnam) with the smartphone exemption unresolved; the DOJ
+  antitrust case in early settlement talks; the Google search remedies in
+  force but under cross-appeal, with the ~$20B+/yr default payment continuing
+  for now; Epic at the Supreme Court (argument early 2027); the EU DMA front
+  calmed on 08-18. Berkshire held its 227.9M shares through Q2. **FQ4 FY26
+  prints ~10-29** (date not yet confirmed by Apple).
+
+The math is the mirror image of Adobe's: at ~35.6x with EPS compounding
+high-single-digits buyback-assisted, a merely *held* multiple returns ~9% a
+year, and any drift toward MSFT's 25x erases three years of it. Nothing about
+the business has to go wrong for this to be a mediocre buy; the multiple has
+to stay generous. It ranks below Hynix, whose price arm passes, and above
+Citigroup on the framework anchor alone — on expected return the bank probably
+edges it, and the prose says so. The QARP-shaped price is far away: the
+loosest arm (5% FCF yield) clears at ~$186 and the EBIT arm at ~$158 on
+trailing numbers, below even the January low.
+
+### 8. Citigroup — nothing to do with AI, everything to do with getting paid
 
 $132.68, $222.6B, −10% off the high — the calm one: no August day moved
 >3.5%. The framework caveat first: QARP cannot screen banks (owner-earnings
@@ -297,7 +373,7 @@ compounding) with the lowest narrative risk on the list — and the least
 upside if the AI trade keeps working. Banamex is 49% sold with the IPO
 still open. Avg PT $154.50. Next print 10-13.
 
-### 8. Palantir — the wobble thesis died on contact; the price question didn't
+### 9. Palantir — the wobble thesis died on contact; the price question didn't
 
 $185.93 (+51% off the July low, back within 10% of the November ATH),
 $446.8B. Q2 2026 (08-03) was, in CNBC's word, "otherworldly": revenue
@@ -317,7 +393,7 @@ worst corporate price. The name to accumulate only when the AI tape turns
 indiscriminate — July 30 at $122 was exactly that moment, and it lasted
 four sessions.
 
-### 9. AMD — the challenger still costs about double the incumbent
+### 10. AMD — the challenger still costs about double the incumbent
 
 $476.67, $778B, −18% off the July intraday high, +123% YTD. The forward
 story keeps thickening: **~14GW of stage commitments** (OpenAI 6GW — first
@@ -334,7 +410,7 @@ execution risk against Rubin, 6.1%/yr trailing dilution, and 5/14
 quality-history gates. Street span is the widest here: avg PT ~$554–614,
 high $1,250 (Baird), low $235. Q3 prints ~11-03.
 
-### 10. Intel — the turnaround is more real; the price still pays for it twice
+### 11. Intel — the turnaround is more real; the price still pays for it twice
 
 $92.09, ~$485B, −35% off the June high yet +150% YTD, beta 2.24. The proof
 advanced: Q2 (07-23) revenue $16.1B **+25%** (fastest since 2011), non-GAAP
@@ -352,7 +428,7 @@ gates — the worst capital record in the set (iROIC −56%) — at **~61x FY26 
 (avg PT $114.88, range $75–200). The story needs the 14A/18A external wins
 to arrive before the next $20B of dilution does.
 
-### 11. Cloudflare — the business accelerates; the framework still can't reach the price
+### 12. Cloudflare — the business accelerates; the framework still can't reach the price
 
 $308.23 (+8.2% on NVDA day; an all-time high $332.22 on 08-13, −16% AI-tape
 drawdown after it), $109.8B. Q2 (08-06) was its best in years: revenue
@@ -370,7 +446,7 @@ EV/revenue) that already prices the option as won. Avg PT $334. The growth
 is the point; the price is the problem — a QARP framework has nothing to
 buy here at any gate.
 
-### 12. Tesla — still failing all three legs at once
+### 13. Tesla — still failing all three legs at once
 
 $354.81 (+19% off the July trough on Nevada robotaxi permits 08-21 and the
 09-03 Cybercab event; −29% off the high), $1.40T. The Q2 print (07-22)
@@ -399,12 +475,13 @@ print ~10-28.
 | 4 | NVDA | 12/14 (price + WC artifact) | ~24.6x FY27 (≈CY26), ~19x FY28 | Rev ~+80%; FY28 guided ~+70% | Cheapest hypergrowth math — if the capex cycle holds |
 | 5 | AVGO | 8/14 (serial-acquirer decade) | ~31.9x FY26 / 19.1x FY27 | AI rev $56B → >$100B guided | NVDA's bet in backlog form; 09-02 print is the test |
 | 6 | 000660 | 8/14 (cyclicality gates) | **~4.7x FY26 / 3.6x FY27** | Rev +260% → +51% | Cheapest by far; ₩40T buyback kills half the bear case |
-| 7 | C | Structurally outside (bank) | ~11.9x FY26 / 10.1x FY27, 1.32x TB | EPS +48% → +18%; ROTCE 13% | Low-teens return, lowest narrative risk; the anti-AI ballast |
-| 8 | PLTR | 5/14 (no 10Y history) | ~116x FY26 / 80x FY27 | Rev +82% → +49% | Best-run hypergrowth; worst corporate price; buy panics only |
-| 9 | AMD | 6/14 (weak trailing record) | ~63x FY26 / 43x FY27 | Rev +47%; EPS +81% | Challenger at ~2x the incumbent's multiple |
-| 10 | INTC | 3/14 (worst capital record) | ~61x FY26 / 45x FY27 | Rev +19% → +13% | Turnaround real, unsigned; dilution machine meanwhile |
-| 11 | NET | 2/14 (pre-profit) | ~245x FY26 / 185x FY27 (non-GAAP) | Rev +32% → +29% | Accelerating tollbooth option, priced as already won |
-| 12 | TSLA | 5/14 (weakest margins) | ~200x FY26, estimates falling | Rev ~+11%; EPS shrinking | Fails quality, price, and growth simultaneously |
+| 7 | AAPL | 13/14 (price gate only) | ~38.6x FY26 / 35.6x FY27 (at 09-25) | Rev +10.5%; EPS +8.6% (FY27) | Highest-certainty franchise at the dearest multiple per growth point; nothing for the framework to buy at $341 |
+| 8 | C | Structurally outside (bank) | ~11.9x FY26 / 10.1x FY27, 1.32x TB | EPS +48% → +18%; ROTCE 13% | Low-teens return, lowest narrative risk; the anti-AI ballast |
+| 9 | PLTR | 5/14 (no 10Y history) | ~116x FY26 / 80x FY27 | Rev +82% → +49% | Best-run hypergrowth; worst corporate price; buy panics only |
+| 10 | AMD | 6/14 (weak trailing record) | ~63x FY26 / 43x FY27 | Rev +47%; EPS +81% | Challenger at ~2x the incumbent's multiple |
+| 11 | INTC | 3/14 (worst capital record) | ~61x FY26 / 45x FY27 | Rev +19% → +13% | Turnaround real, unsigned; dilution machine meanwhile |
+| 12 | NET | 2/14 (pre-profit) | ~245x FY26 / 185x FY27 (non-GAAP) | Rev +32% → +29% | Accelerating tollbooth option, priced as already won |
+| 13 | TSLA | 5/14 (weakest margins) | ~200x FY26, estimates falling | Rev ~+11%; EPS shrinking | Fails quality, price, and growth simultaneously |
 
 ## What the snapshot says overall
 
@@ -413,7 +490,11 @@ still passes everything at the 08-27 price with headroom; Citigroup is
 cheap on bank lenses but is a different asset class in this list. The
 platform pair re-rated hard off the June-July trough — MSFT's +15.5% day
 closed the window QARP had been pointing at — and now trade at 23–26x
-next-year earnings: fair for the quality, no longer mispriced. NVDA (and
+next-year earnings: fair for the quality, no longer mispriced. Apple joins
+MSFT in the quality-without-price camp — 13/14, the price gate the only
+failure — but at ~36x next-year earnings for high-single-digit growth it is
+the dearest multiple per growth point in the group, and the framework has
+nothing to buy at a record high. NVDA (and
 AVGO in backlog form) keep converting the AI-capex thesis into printed
 numbers at ~19–25x forward, which is the group's honest growth-at-a-price
 zone. Hynix is the statistical outlier — ~3.6x next-year consensus with
@@ -457,6 +538,33 @@ ballast for whoever wants the AI exposure diluted.
 - **Correction to the superseded July memo**: MSFT's "FY27 capex guided
   ~$255–260B" was a street preview circulating as guidance; the company
   gave only a qualitative "grows year-over-year" plus Q1 FY27 capex >$50B.
+- **Apple's column mixes two vintages by design**: trailing rows from the
+  2026-08-11 run at the 08-07 close ($313.33), forward layer from a
+  2026-09-26 sweep at $341.07. The other twelve forward layers were not
+  refreshed on insertion.
+- **Apple's net debt (+0.13x EBITDA) is a cash-scope reading, not a
+  balance-sheet fact**: pyvalue's cash chain stops at current marketable
+  securities ($62.4B) and no `LongTermInvestments` concept is stored, so the
+  $84.1B of non-current securities are invisible to EV and net debt. On the
+  company's own basis Apple is $62.2B net cash; EV is 1.8% overstated and
+  every price arm ~2% too low. No gate moves. Whether the cash chain should
+  read long-term marketable securities is a design question for the
+  metrics layer, not fixed here.
+- **Apple's iROIC 5Y (533%) is a vendor-consistency artifact**: EODHD's
+  FY2025 `TotalDebtFromBalanceSheet` folds ~$10.9B of lease liabilities into
+  the rollup while its FY2020 rollup carries none, so the broader-reading
+  rule sees +$10.4B of invested capital over five years where a
+  lease-consistent basis sees −$3.3B (which would emit the 1.0 cap). Same
+  root as `roic_7y_median` reading 64.6% against 66.7% on SEC data.
+- **Apple's vendor EPS and interest rows**: EODHD's Q3 FY26 EPS is $1.91
+  against a filed diluted $2.02 (`eps_ttm` $8.61 vs $8.71); `InterestExpense`
+  carries placeholder rows (FY2024 = 0, Q2-2025 = $1M) because Apple stopped
+  disclosing the line after FY2023, and `interest_coverage` correctly emits
+  the 100x cap on the debt ≤ 1x EBIT evidence (0.54x). Neither reaches a gate.
+- **Apple's QARP inputs reconcile to SEC filings**: every criterion was
+  recomputed from XBRL company facts at the DB cut-off and matches to the
+  decimal (table in its watchlist profile); the one non-QARP NA,
+  `price_to_ncav`, is structural (negative NCAV by design).
 - Citigroup's corporate-shaped metrics (gross margin, CFO/NI, FCF, EV
   multiples) compute but are not economically meaningful for a bank; its
   QARP price-gate pass should not be read as a screen endorsement.
@@ -469,20 +577,24 @@ first on the rebuilt debt basis, commits `d5d8b34`…`053dcda`), read with the
 needed because nothing has been ingested since. Gates evaluated exactly as
 `screeners/quality_reasonable_price_primary.yml` defines them (missing
 metric → NA; an `any_of` with no passing arm fails). Cross-checked against
-`pyvalue report-screen-failures` on the same twelve symbols: the 1/12
+`pyvalue report-screen-failures` on the same thirteen symbols: the 1/13
 full-pass count and all fourteen per-criterion fallout counts reconcile.
+Apple's inputs were additionally recomputed from its SEC XBRL company facts
+(10-K FY2013–FY2025, 10-Qs through the June 2026 quarter) at the DB
+cut-off, using pyvalue's own definitions, and reconcile to the decimal.
 
 **Web layer**: four parallel sweeps run 2026-08-28 (platforms
 MSFT/GOOGL/ADBE; AI semis NVDA/AMD/AVGO; cyclical/turnaround/financial
-INTC/000660/C; high-multiple growth TSLA/PLTR/NET), each cross-checking
-prices against at least two independent sources and pulling latest-quarter
-actuals, consensus forward estimates (stockanalysis.com / S&P Global,
-TipRanks, MarketBeat, Zacks), catalysts, risks, and street views with
-per-fact source dates. Notable primary sources: company releases/filings
-(NVDA Q2 FY27, PLTR Q2, NET Q2, SK Hynix Q2 newsroom + ₩40T buyback
-release, Citi Q2, MSFT FY26 Q4 + 10-K OpenAI disclosures, Broadcom Q2
-FY26), CNBC, Bloomberg/KED (Korea), Electrek/TechCrunch (robotaxi),
-TrendForce (memory pricing). Facts resting on a single source are flagged
-in the sweeps' archives and were either corroborated or hedged in the prose
-above. Consensus figures move intraday; treat every multiple in this
-document as ±5% within its own day.
+INTC/000660/C; high-multiple growth TSLA/PLTR/NET), plus a fifth on Apple
+run 2026-09-26 under the same protocol, each cross-checking prices against
+at least two independent sources and pulling latest-quarter actuals,
+consensus forward estimates (stockanalysis.com / S&P Global, TipRanks,
+MarketBeat, Zacks), catalysts, risks, and street views with per-fact source
+dates. Notable primary sources: company releases/filings (NVDA Q2 FY27, PLTR
+Q2, NET Q2, SK Hynix Q2 newsroom + ₩40T buyback release, Citi Q2, MSFT FY26
+Q4 + 10-K OpenAI disclosures, Broadcom Q2 FY26, Apple Q3 FY26 release +
+10-Q + the Ternus 8-K), CNBC, Bloomberg/KED (Korea), Electrek/TechCrunch
+(robotaxi), TrendForce (memory pricing). Facts resting on a single source
+are flagged in the sweeps' archives and were either corroborated or hedged
+in the prose above. Consensus figures move intraday; treat every multiple in
+this document as ±5% within its own day.

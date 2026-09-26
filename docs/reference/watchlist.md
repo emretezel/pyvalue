@@ -15,7 +15,7 @@ only the first kind.
 This file is the canonical record of the watchlist; update it here (and only here)
 when the set changes.
 
-## Tracked stocks (12)
+## Tracked stocks (13)
 
 | Canonical symbol | listing_id | Issuer | Exchange | Currency |
 |---|---|---|---|---|
@@ -31,23 +31,26 @@ when the set changes.
 | 000660.KO | 24625 | SK Hynix Inc | KO (KOSPI) | KRW |
 | NET.US | 65665 | Cloudflare Inc | US | USD |
 | AVGO.US | 54870 | Broadcom Inc | US | USD |
+| AAPL.US | 53177 | Apple Inc. | US | USD |
 
 `listing_id` values are recorded so ad-hoc read-only SQL can target these rows
 without symbol joins.
 
 ### Recomputed 2026-08-11
 
-All eleven were recomputed in the full-universe run of 2026-08-11, the first on
-the rebuilt debt basis (`d5d8b34`, `d2e600c`, `c24aad2`, then `71b259d`,
-`ce92a3f`). Every ROIC figure on the watchlist moved, because the ROIC FY series
-had kept a private copy of the retired components-preferred debt rule until
-`ce92a3f`. **Microsoft is now net debt +0.27x EBITDA rather than net cash** —
-the old figure omitted $78.8B of finance leases.
+All eleven names then on the watchlist were recomputed in the full-universe
+run of 2026-08-11, the first on the rebuilt debt basis (`d5d8b34`, `d2e600c`,
+`c24aad2`, then `71b259d`, `ce92a3f`); Broadcom and Apple, added later, were
+in the same run's universe and carry rows of the same vintage. Every ROIC
+figure on the watchlist moved, because the ROIC FY series had kept a private
+copy of the retired components-preferred debt rule until `ce92a3f`.
+**Microsoft is now net debt +0.27x EBITDA rather than net cash** — the old
+figure omitted $78.8B of finance leases.
 
 `ADBE.US` remains the **only** watchlist name that passes QARP, at 14 of 14
-gates. `MSFT.US` is 13/14 on the price gate alone; `GOOGL.US` slipped to 12/14
-when Q2 2026's one-time investment gains pushed CFO/NI TTM to 0.76. Gate-by-gate
-detail for all twelve names is in the
+gates. `MSFT.US` and `AAPL.US` are 13/14 on the price gate alone; `GOOGL.US`
+slipped to 12/14 when Q2 2026's one-time investment gains pushed CFO/NI TTM to
+0.76. Gate-by-gate detail for all thirteen names is in the
 [Watchlist Buy Ranking](../research/watchlist-buy-ranking.md), which is
 maintained as a latest snapshot.
 
@@ -71,13 +74,26 @@ tissue from a decade of serial acquisition rather than operating weakness. See
 the [Watchlist Buy Ranking](../research/watchlist-buy-ranking.md) for the
 forward story and where it slots among the watchlist names.
 
+### Apple (AAPL.US) joined 2026-09-26
+
+Apple (`AAPL.US`, listing 53177) is the thirteenth name. As with Cloudflare
+and Broadcom the addition was documentation only: the catalog already carried
+it as a `primary` US listing and its metrics were current from the 2026-08-11
+full-universe run, so nothing was ingested or recomputed. It **fails QARP, 13
+gates of 14, on the price gate alone, with all fourteen criteria computable —
+zero NAs** — the same shape as Microsoft, and every input was independently
+recomputed from Apple's SEC filings at the DB's own cut-off and reconciled.
+See [Apple's QARP profile](#apple-aaplus-qarp-profile-2026-09-26) below, and
+the [Watchlist Buy Ranking](../research/watchlist-buy-ranking.md) for the
+forward story and its rank.
+
 ## Paste-ready scope line
 
 All pyvalue commands share one scope resolver, so the watchlist can be passed
 verbatim to any of them:
 
 ```
---symbols MSFT.US GOOGL.US ADBE.US NVDA.US AMD.US C.US PLTR.US TSLA.US INTC.US 000660.KO NET.US AVGO.US
+--symbols MSFT.US GOOGL.US ADBE.US NVDA.US AMD.US C.US PLTR.US TSLA.US INTC.US 000660.KO NET.US AVGO.US AAPL.US
 ```
 
 ## Cloudflare (NET.US) QARP profile, refreshed 2026-08-11
@@ -198,6 +214,108 @@ Vendor caveat, same pattern as
 quarterly `NetIncomeLoss` sums to $29.3B TTM, ≈ $6.0 diluted — so
 `earnings_yield` (1.9%) is flattered by amortisation and SBC add-backs. No
 QARP criterion reads either; recorded to pre-empt rediscovery.
+
+## Apple (AAPL.US) QARP profile (2026-09-26)
+
+Recorded on addition. Source data is the stored **2026-08-11 full-universe
+metric run** (see [Recomputed 2026-08-11](#recomputed-2026-08-11)) — `AAPL.US`
+(listing 53177) was in that run's universe before it joined the watchlist, so
+the rows below required no fresh compute. Fundamentals run through Q3 FY2026
+(Apple's quarter ended 2026-06-27, stored under end_date 2026-06-30; facts
+refreshed 2026-08-10); price $313.33 and market cap $4.573T as of 2026-08-07.
+By the 2026-09-26 addition date the shares had risen ~9% to a record $341.07
+(09-25 close), so the price-linked rows below read correspondingly *cheaper*
+than a same-day compute would.
+
+Apple **fails QARP, 13 gates of 14** — the price gate alone:
+
+| Gate | Result | Value |
+|---|---|---|
+| ROIC years >12% ≥ 7/10 | **pass** | 10 of 10 |
+| ROIC 10Y min ≥ 7% | **pass** | 21.8% (FY2017) |
+| Gross margin (TTM) ≥ 35% | **pass** | 48.7% |
+| GM stability (10Y std) ≤ 7pp | **pass** | 3.3pp — a monotonic climb from 39% to 47% |
+| OPM 7Y min ≥ 5% | **pass** | 24.1% (FY2020) |
+| CFO/NI TTM ≥ 0.90 | **pass** | 1.14 |
+| CFO/NI 10Y median ≥ 0.90 | **pass** | 1.26 (never below 0.99 in the ten years; FY2025 the tightest at 0.995) |
+| Net debt/EBITDA ≤ 2.5x | **pass** | 0.13x (see the cash-scope note below) |
+| Debt service (6x cov or ≤1.5x) | **pass** | both arms: coverage 100x (documented cap), net debt 0.13x |
+| No NI loss years (10Y) | **pass** | 0 |
+| Share CAGR 5Y ≤ +1% | **pass** | −2.5%/yr (10Y −3.9%/yr) |
+| Price gate (OEY/EBIT/FCF yield) | FAIL | 2.13% / 3.37% / 2.97% — all three arms, each roughly half the bar |
+| iROIC 5Y ≥ 12% | **pass** | 5.33 (533%; see the rollup note below) |
+| Owner-earnings CAGR 10Y ≥ 7% | **pass** | 11.1% |
+
+**Every criterion is computable — zero NAs on the QARP set**, the same clean
+record as Broadcom's. The single failure is price, on current economics:
+EV/EBIT 29.7x trailing, FCF yield on EV 3.0%, and a normalised owner-earnings
+yield of 2.1% — the Microsoft-shaped verdict (see the
+[MSFT QARP Review](../research/msft-qarp-review-2026-08.md)). The
+owner-earnings arm is structurally the lowest for Apple because the five-year
+*median* FY owner earnings ($98B) trail the current run-rate; the plain EBIT
+and FCF arms fail on their own anyway. Everything else is emphatic: ten of ten
+ROIC years above 12% with the worst year (FY2017) at 21.8%, gross margin held
+inside a 3.3pp band across a decade in which it climbed nine points, and
+operating cash flow never below 0.99x net income in any of the last ten
+fiscal years (median 1.26x).
+
+Structural NA outside the QARP criteria: `price_to_ncav` refuses to compute
+because NCAV is negative — Apple runs current assets ($149.8B at Q3 FY2026)
+almost exactly against current liabilities ($149.3B) by design, so there is no
+net-current-asset value to price. Correct guard, not a defect: the Graham
+screen's net-net lens does not apply to a franchise business.
+
+### Independent verification (SEC filings, 2026-09-26)
+
+Every QARP input was recomputed from Apple's XBRL company facts on sec.gov
+(10-K FY2013–FY2025, 10-Qs through the quarter ended 2026-06-27) at the DB's
+own cut-off — the 2026-08-07 close of $313.33, confirmed against Nasdaq's
+price history — using pyvalue's definitions: NOPAT at the period's effective
+tax rate, invested capital = debt + equity − cash, maintenance capex =
+min(capex, 1.1 × D&A), maintenance NWC = the three-year average delta floored
+at zero, and three-year-average CAGR endpoints.
+
+| Metric | Stored | SEC recompute |
+|---|---|---|
+| ROIC years >12% / 10Y min / 10Y median | 10 / 21.8% / 51.8% | 10 / 21.8% / 51.9% |
+| ROIC 7Y median | 64.6% | 66.7% |
+| GM 10Y std / OPM 7Y min | 3.33pp / 24.1% | 3.33pp / 24.1% |
+| CFO/NI TTM / 10Y median | 1.138 / 1.259 | 1.138 / 1.259 |
+| Net debt/EBITDA | 0.130x | 0.131x |
+| Share count CAGR 5Y | −2.55% | −2.59% |
+| EBIT / FCF / OE yield on EV | 3.370% / 2.975% / 2.134% | 3.370% / 2.975% / 2.133% |
+| Owner-earnings CAGR 10Y | 11.12% | 11.12% |
+| ROIC TTM / OPM TTM / FCF margin TTM | 90.3% / 33.2% / 29.3% | 90.3% / 33.2% / 29.3% |
+| Revenue CAGR 10Y / EV/EBIT | 5.94% / 29.67 | 5.94% / 29.67 |
+
+The gate verdicts are identical on either basis. Three conventions surfaced,
+recorded so they are not re-discovered; none is a defect and none moves a
+gate:
+
+- **Net cash is a scope choice.** pyvalue's cash leg is cash plus *current*
+  marketable securities ($62.4B at 2026-06-27); Apple's $84.1B of
+  *non-current* marketable securities sit outside the chain (no
+  `LongTermInvestments` concept is stored for the listing). pyvalue therefore
+  reads net debt of +$21.9B where Apple's own net-cash figure is +$62.2B. EV
+  is 1.8% higher than on the company basis; the EBIT yield would be 3.43%
+  there — still a fail.
+- **The 533% incremental ROIC rests on a vendor rollup inconsistency.**
+  EODHD's FY2025 `TotalDebtFromBalanceSheet` ($112.4B) folds ~$10.9B of lease
+  liabilities into the rollup, while its FY2020 rollup ($112.4B) equals the
+  borrowed components with no lease component. The broader-reading debt rule
+  therefore measures a +$10.4B five-year change in invested capital where a
+  lease-consistent basis shows −$3.3B; on that basis NOPAT grew $55.6B on
+  shrinking capital and the metric would emit the documented 1.0 cap. Pass
+  either way; the same effect puts `roic_7y_median` two points below the SEC
+  recompute.
+- **Vendor EPS drifts from the filing.** EODHD's Q3 FY2026 EPS is $1.91
+  against a filed diluted $2.02, so `eps_ttm` reads $8.61 versus $8.71 (P/E
+  36.4x versus 36.0x at the DB price). No QARP criterion reads it.
+  Relatedly, `InterestExpense` carries placeholder rows (FY2024 = 0,
+  Q2-2025 = $1M): Apple stopped disclosing interest expense separately after
+  FY2023, and `interest_coverage` correctly falls to the documented 100x cap
+  on the no-material-debt evidence (debt 0.54x TTM EBIT). The coverage arm is
+  redundant at 0.13x net debt/EBITDA in any case.
 
 ## SK Hynix cross-listings (known, NOT tracked)
 

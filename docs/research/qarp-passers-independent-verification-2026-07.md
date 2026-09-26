@@ -74,9 +74,9 @@ businesses. Only the valuation gate is corrupted, and only because the price is 
 a currency and the raw price exceeds 100:
 
 ```python
-subunit_hint = EXCHANGE_SUBUNIT_HINTS.get(suffix)   # "GBX" for LSE
+subunit_hint = EXCHANGE_SUBUNIT_HINTS.get(suffix)  # "GBX" for LSE
 if subunit_hint and currency is None and price and price > 100:
-    currency = subunit_hint                          # -> later divided by 100
+    currency = subunit_hint  # -> later divided by 100
 ```
 
 Correct for LSE's pence-quoted domestic lines; **wrong for the USD/EUR-quoted international order book**,
