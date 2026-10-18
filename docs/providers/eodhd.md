@@ -21,6 +21,10 @@ You need an active EODHD subscription for:
 - fundamentals endpoints
 - market data endpoints
 
+The subscription does not have to run all year. The holdings are refreshed in
+four one-month windows timed to their reporting calendars; see
+[EODHD Subscription Schedule](eodhd-subscription-schedule.md).
+
 ## Universe Loading
 
 `pyvalue` stores the EODHD supported-exchange catalog in SQLite and uses it for
@@ -557,5 +561,6 @@ Many newer metrics in the project are intentionally EODHD-oriented because they 
 ## Related Docs
 
 - [Configuration](../configuration.md)
+- [EODHD Subscription Schedule](eodhd-subscription-schedule.md)
 - [Market Data Guide](../guides/market-data.md)
 - [Ingestion and Normalization Guide](../guides/ingestion-and-normalization.md)

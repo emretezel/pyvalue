@@ -10,6 +10,7 @@ This directory is the main documentation home for `pyvalue`. Each file owns one 
 ## Provider Documentation
 
 - [EODHD](providers/eodhd.md): global fundamentals, universe loading, and market-data behavior.
+- [EODHD Subscription Schedule](providers/eodhd-subscription-schedule.md): the four one-month subscription windows, the holdings' reporting calendars behind them, and the per-window run sheet.
 
 ## Task Guides
 
