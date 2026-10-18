@@ -26,6 +26,11 @@ dev = [
     # `# type: ignore[import-untyped]`. Keep in lockstep with the runtime deps above.
     "types-requests>=2.31",
     "types-PyYAML>=6.0",
+    # ``typing_extensions.TypeIs`` backs the metric-shape predicate in
+    # pyvalue.metrics.base under a TYPE_CHECKING guard (Python 3.12 has no
+    # typing.TypeIs). mypy depends on it anyway; declared so the gate's
+    # requirement is visible in the metadata rather than transitive.
+    "typing_extensions>=4.10",
 ]
 
 [project.scripts]
@@ -46,6 +51,16 @@ pyvalue = ["py.typed"]
 [tool.pytest.ini_options]
 addopts = "-ra"
 testpaths = ["tests"]
+
+[tool.ruff.lint]
+# The lint gate is pinned to an explicit rule set so it cannot drift with
+# ruff's release defaults: ruff 0.16 widened its default selection from the
+# E4/E7/E9/F core to roughly 415 rules, which turned a tree that was clean
+# under 0.15 into ~2,700 findings without a single code change (2026-10-18).
+# These four groups are the rules the codebase has actually been held to.
+# Widening the set (pyupgrade, isort's `I`, datetime-tz, ...) is a deliberate
+# decision with its own sweep, not a side effect of a tool upgrade.
+select = ["E4", "E7", "E9", "F"]
 
 [tool.mypy]
 # Strict type coverage is the project standard (see CLAUDE.md): every function

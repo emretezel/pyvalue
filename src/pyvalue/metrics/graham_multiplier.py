@@ -26,7 +26,7 @@ from pyvalue.metrics.utils import (
     sum_money,
 )
 from pyvalue.money import Money
-from pyvalue.persistence.storage import MarketDataRepository
+from pyvalue.marketdata import MarketDataReader
 
 EPS_CONCEPTS = ["EarningsPerShare"]
 EQUITY_CONCEPTS = ["StockholdersEquity"]
@@ -52,7 +52,7 @@ class GrahamMultiplierMetric:
         self,
         listing_id: int,
         repo: RegionFactsRepository,
-        market_repo: MarketDataRepository,
+        market_repo: MarketDataReader,
     ) -> Optional[MetricResult]:
         # Resolve the listing currency once; every monetary input (EPS, equity,
         # goodwill, intangibles, price) is aligned to it so the price/EPS and
@@ -227,7 +227,7 @@ class GrahamMultiplierMetric:
         self,
         listing_id: int,
         repo: RegionFactsRepository,
-        market_repo: MarketDataRepository,
+        market_repo: MarketDataReader,
     ) -> Optional[float]:
         record = resolve_current_share_count(listing_id, repo, market_repo)
         if record is None or not is_recent_fact(record):
@@ -235,7 +235,7 @@ class GrahamMultiplierMetric:
         return record.value
 
     def _latest_snapshot(
-        self, market_repo: MarketDataRepository, listing_id: int
+        self, market_repo: MarketDataReader, listing_id: int
     ) -> Optional[PriceData]:
         if hasattr(market_repo, "latest_snapshot_by_id"):
             snapshot = market_repo.latest_snapshot_by_id(listing_id)

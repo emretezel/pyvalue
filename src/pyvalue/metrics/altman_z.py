@@ -33,7 +33,7 @@ from pyvalue.metrics.utils import (
     require_metric_ticker_currency,
 )
 from pyvalue.money import Money
-from pyvalue.persistence.storage import MarketDataRepository
+from pyvalue.marketdata import MarketDataReader
 
 LOGGER = logging.getLogger(__name__)
 
@@ -82,7 +82,7 @@ class AltmanZMetric:
         self,
         listing_id: int,
         repo: RegionFactsRepository,
-        market_repo: MarketDataRepository,
+        market_repo: MarketDataReader,
     ) -> Optional[MetricResult]:
         # Resolve the listing currency once; every monetary component is
         # aligned to it, so each X term is a currency-safe Money/Money ratio.

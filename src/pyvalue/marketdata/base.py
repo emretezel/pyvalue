@@ -6,7 +6,7 @@ Author: Emre Tezel
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Protocol
+from typing import Optional, Protocol, Tuple
 
 
 @dataclass(frozen=True)
@@ -72,3 +72,29 @@ class MarketDataProvider(Protocol):
     """Protocol for fetching latest price/market data."""
 
     def latest_price(self, symbol: str) -> PriceQuote: ...
+
+
+class MarketDataReader(Protocol):
+    """Read-side interface the metrics layer needs from stored market data.
+
+    Price-linked metrics depend on three lookups, keyed by ``listing_id``: the
+    latest stored snapshot, the latest price with its date, and the snapshot
+    nearest a given date (for the share-count resolver, which must divide the
+    provider's market-cap anchor by the close of the day it was computed on).
+    Typing the metrics against this protocol rather than the SQLite repository
+    keeps them indifferent to *where* the prices come from -- the storage
+    repository and the CLI's per-listing caching wrapper both qualify -- and
+    states the whole surface a metric may touch.
+    """
+
+    def latest_snapshot_by_id(self, listing_id: int) -> Optional[PriceData]: ...
+
+    def latest_price_by_id(self, listing_id: int) -> Optional[Tuple[str, float]]: ...
+
+    def snapshot_near_date_by_id(
+        self,
+        listing_id: int,
+        as_of: str,
+        *,
+        max_distance_days: int,
+    ) -> Optional[PriceData]: ...

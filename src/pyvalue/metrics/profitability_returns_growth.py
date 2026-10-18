@@ -33,7 +33,7 @@ from pyvalue.metrics.utils import (
     sum_money,
 )
 from pyvalue.money import Money
-from pyvalue.persistence.storage import MarketDataRepository
+from pyvalue.marketdata import MarketDataReader
 
 LOGGER = logging.getLogger(__name__)
 
@@ -421,7 +421,7 @@ class ProfitabilityReturnsGrowthCalculator:
         self,
         listing_id: int,
         repo: RegionFactsRepository,
-        market_repo: MarketDataRepository,
+        market_repo: MarketDataReader,
     ) -> Optional[_RatioSnapshot]:
         dividends_paid = self._compute_ttm_amount(
             listing_id,
@@ -727,7 +727,7 @@ class ProfitabilityReturnsGrowthCalculator:
         listing_id: int,
         dividends_paid: _MoneySnapshot,
         repo: RegionFactsRepository,
-        market_repo: MarketDataRepository,
+        market_repo: MarketDataReader,
         *,
         context: str,
     ) -> Optional[_RatioSnapshot]:
@@ -1742,7 +1742,7 @@ class DividendYieldTTMMetric:
         self,
         listing_id: int,
         repo: RegionFactsRepository,
-        market_repo: MarketDataRepository,
+        market_repo: MarketDataReader,
     ) -> Optional[MetricResult]:
         snapshot = ProfitabilityReturnsGrowthCalculator().compute_dividend_yield_ttm(
             listing_id,
@@ -1771,7 +1771,7 @@ class ShareholderYieldTTMMetric:
         self,
         listing_id: int,
         repo: RegionFactsRepository,
-        market_repo: MarketDataRepository,
+        market_repo: MarketDataReader,
     ) -> Optional[MetricResult]:
         dividend_yield = DividendYieldTTMMetric().compute(listing_id, repo, market_repo)
         if dividend_yield is None:

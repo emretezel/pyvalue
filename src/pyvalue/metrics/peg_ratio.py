@@ -28,7 +28,7 @@ from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.earnings_yield import EarningsYieldMetric
 from pyvalue.metrics.graham_eps_cagr import compute_graham_eps_cagr
 from pyvalue.metrics.profitability_returns_growth import DividendYieldTTMMetric
-from pyvalue.persistence.storage import MarketDataRepository
+from pyvalue.marketdata import MarketDataReader
 
 LOGGER = logging.getLogger(__name__)
 
@@ -45,7 +45,7 @@ PEG_DIV_ADJ_REQUIRED_CONCEPTS = tuple(
 def _resolve_pe(
     listing_id: int,
     repo: RegionFactsRepository,
-    market_repo: MarketDataRepository,
+    market_repo: MarketDataReader,
     *,
     context: str,
 ) -> Optional[tuple[float, str]]:
@@ -83,7 +83,7 @@ class PEGRatioMetric:
         self,
         listing_id: int,
         repo: RegionFactsRepository,
-        market_repo: MarketDataRepository,
+        market_repo: MarketDataReader,
     ) -> Optional[MetricResult]:
         pe = _resolve_pe(listing_id, repo, market_repo, context=self.id)
         if pe is None:
@@ -124,7 +124,7 @@ class PEGRatioDividendAdjustedMetric:
         self,
         listing_id: int,
         repo: RegionFactsRepository,
-        market_repo: MarketDataRepository,
+        market_repo: MarketDataReader,
     ) -> Optional[MetricResult]:
         pe = _resolve_pe(listing_id, repo, market_repo, context=self.id)
         if pe is None:

@@ -23,7 +23,7 @@ from pyvalue.metrics.utils import (
     market_cap_money,
 )
 from pyvalue.money import Money
-from pyvalue.persistence.storage import MarketDataRepository
+from pyvalue.marketdata import MarketDataReader
 
 LOGGER = logging.getLogger(__name__)
 
@@ -47,7 +47,7 @@ def resolve_enterprise_value_denominator(
     *,
     listing_id: int,
     repo: RegionFactsRepository,
-    market_repo: MarketDataRepository,
+    market_repo: MarketDataReader,
     target_currency: str,
     context: str,
     max_age_days: int = MAX_FACT_AGE_DAYS,

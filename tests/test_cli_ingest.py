@@ -44,7 +44,7 @@ from conftest import (
 )
 from pyvalue.currency import MetricUnitKind
 from pyvalue.facts import RegionFactsRepository
-from pyvalue.metrics import REGISTRY
+from pyvalue.metrics import REGISTRY, needs_market_data
 from pyvalue.metrics.base import MetricCurrencyInvariantError, MetricResult
 from pyvalue.metrics.utils import MAX_FACT_AGE_DAYS
 from pyvalue.persistence.storage.base import SQLiteStore
@@ -3352,10 +3352,11 @@ def test_compute_metrics_for_symbol_matches_real_metrics(tmp_path: Path) -> None
     plain_market_repo = MarketDataRepository(db_path)
     for metric_id in metric_ids:
         metric = REGISTRY[metric_id]()
-        if getattr(metric, "uses_market_data", False):
+        if needs_market_data(metric):
             result = metric.compute(listing_id, plain_fact_repo, plain_market_repo)
         else:
             result = metric.compute(listing_id, plain_fact_repo)
+        assert result is not None
         expected[metric_id] = (result.value, result.as_of)
 
     computed = cli._compute_metrics_for_symbol(

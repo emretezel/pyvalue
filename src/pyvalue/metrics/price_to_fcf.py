@@ -21,7 +21,7 @@ from pyvalue.metrics.utils import (
     sum_money,
 )
 from pyvalue.money import Money
-from pyvalue.persistence.storage import MarketDataRepository
+from pyvalue.marketdata import MarketDataReader
 
 OPERATING_CASH_FLOW_CONCEPTS = ["NetCashProvidedByUsedInOperatingActivities"]
 CAPEX_CONCEPTS = ["CapitalExpenditures"]
@@ -52,7 +52,7 @@ class PriceToFCFMetric:
         self,
         listing_id: int,
         repo: RegionFactsRepository,
-        market_repo: MarketDataRepository,
+        market_repo: MarketDataReader,
     ) -> Optional[MetricResult]:
         target_currency = require_metric_ticker_currency(
             listing_id, repo, metric_id=self.id, input_name="FreeCashFlow"

@@ -30,7 +30,7 @@ from pyvalue.metrics.share_resolver import (
     resolve_current_share_count,
 )
 from pyvalue.money import CurrencyMismatchError, Money, fx_service_for_context
-from pyvalue.persistence.storage import MarketDataRepository
+from pyvalue.marketdata import MarketDataReader
 
 # Default freshness windows (days), measured on the period end_date (not the
 # filing date). Quarterly/TTM data stays at 400 days. FY-series metrics get
@@ -464,7 +464,7 @@ def market_cap_money(
     listing_id: int,
     *,
     repo: RawFactSource,
-    market_repo: MarketDataRepository,
+    market_repo: MarketDataReader,
     metric_id: str,
     target_currency: Optional[str] = None,
     contexts: Sequence[object] = (),
@@ -479,7 +479,7 @@ def market_cap_money(
     share-basis metric prices the same total -- note the deliberate change from
     the old unconditional Entity-first read: a fresher Common periodic row (or
     an anchor-endorsed snapshot) can now win. Pairing that count with the
-    latest ``market_data`` price (:meth:`MarketDataRepository.latest_snapshot_by_id`)
+    latest ``market_data`` price (:meth:`MarketDataReader.latest_snapshot_by_id`)
     -- rather than the price as of the share-count date -- means every price
     refresh re-prices market cap (and every metric built on it), which is what
     a value screen that refreshes prices between quarterly fundamentals needs.

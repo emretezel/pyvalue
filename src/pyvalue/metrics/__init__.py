@@ -3,7 +3,14 @@
 Author: Emre Tezel
 """
 
-from .base import Metric, MetricResult, wrap_metric_currency_invariants
+from .base import (
+    AnyMetric,
+    MarketDataMetric,
+    Metric,
+    MetricResult,
+    needs_market_data,
+    wrap_metric_currency_invariants,
+)
 from .working_capital import WorkingCapitalMetric
 from .current_ratio import CurrentRatioMetric
 from .debt_paydown_years import DebtPaydownYearsMetric, FCFToDebtMetric
@@ -108,7 +115,12 @@ from .profitability_returns_growth import (
     ShareholderYieldTTMMetric,
 )
 
-REGISTRY = {
+# Annotated explicitly: the values are ~90 unrelated classes, and an inferred
+# dict type would join them to ``type[object]`` -- losing ``compute`` for every
+# caller. Each class is checked structurally against one of the two metric
+# protocols, so a registered metric that drifts from either shape fails mypy
+# here rather than at a call site.
+REGISTRY: dict[str, type[AnyMetric]] = {
     WorkingCapitalMetric.id: WorkingCapitalMetric,
     CurrentRatioMetric.id: CurrentRatioMetric,
     DebtPaydownYearsMetric.id: DebtPaydownYearsMetric,
@@ -208,8 +220,11 @@ for _metric_cls in REGISTRY.values():
     wrap_metric_currency_invariants(_metric_cls)
 
 __all__ = [
+    "AnyMetric",
+    "MarketDataMetric",
     "Metric",
     "MetricResult",
+    "needs_market_data",
     "WorkingCapitalMetric",
     "CurrentRatioMetric",
     "DebtPaydownYearsMetric",

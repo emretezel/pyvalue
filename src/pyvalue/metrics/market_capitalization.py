@@ -12,7 +12,7 @@ from typing import Optional
 from pyvalue.facts import RegionFactsRepository
 from pyvalue.metrics.base import MetricResult
 from pyvalue.metrics.utils import SHARE_RESOLVER_REQUIRED_CONCEPTS, market_cap_money
-from pyvalue.persistence.storage import MarketDataRepository
+from pyvalue.marketdata import MarketDataReader
 
 LOGGER = logging.getLogger(__name__)
 
@@ -31,7 +31,7 @@ class MarketCapitalizationMetric:
         self,
         listing_id: int,
         repo: RegionFactsRepository,
-        market_repo: MarketDataRepository,
+        market_repo: MarketDataReader,
     ) -> Optional[MetricResult]:
         cap = market_cap_money(
             listing_id,

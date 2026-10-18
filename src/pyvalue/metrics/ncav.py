@@ -26,7 +26,7 @@ from pyvalue.metrics.utils import (
     require_metric_ticker_currency,
 )
 from pyvalue.money import Money
-from pyvalue.persistence.storage import MarketDataRepository
+from pyvalue.marketdata import MarketDataReader
 
 LOGGER = logging.getLogger(__name__)
 
@@ -137,7 +137,7 @@ class PriceToNCAVMetric:
         self,
         listing_id: int,
         repo: RegionFactsRepository,
-        market_repo: MarketDataRepository,
+        market_repo: MarketDataReader,
     ) -> Optional[MetricResult]:
         ncav = compute_ncav(listing_id, repo, context=self.id)
         if ncav is None:

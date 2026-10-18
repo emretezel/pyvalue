@@ -23,7 +23,7 @@ from pyvalue.metrics.utils import (
     sum_money,
 )
 from pyvalue.money import Money
-from pyvalue.persistence.storage import MarketDataRepository
+from pyvalue.marketdata import MarketDataReader
 
 LOGGER = logging.getLogger(__name__)
 
@@ -65,7 +65,7 @@ class NetBuybackYieldMetric:
         self,
         listing_id: int,
         repo: RegionFactsRepository,
-        market_repo: MarketDataRepository,
+        market_repo: MarketDataReader,
     ) -> Optional[MetricResult]:
         numerator = self._compute_net_buybacks_ttm(listing_id, repo)
         if numerator is not None:

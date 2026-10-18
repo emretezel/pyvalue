@@ -505,6 +505,21 @@ class _CachedMarketDataRepository:
             return None
         return snapshot.as_of, snapshot.price
 
+    def snapshot_near_date_by_id(
+        self,
+        listing_id: int,
+        as_of: str,
+        *,
+        max_distance_days: int,
+    ) -> Optional[PriceData]:
+        # Not cached: the near-date lookup is keyed by a historical date, so a
+        # single latest-snapshot cache cannot serve it. Forwarded explicitly
+        # (rather than through ``__getattr__``) so this wrapper visibly
+        # implements the whole ``MarketDataReader`` surface the metrics use.
+        return self._repo.snapshot_near_date_by_id(
+            listing_id, as_of, max_distance_days=max_distance_days
+        )
+
     def ticker_currency_by_id(self, listing_id: int) -> Optional[str]:
         if int(listing_id) != self._listing_id:
             resolver = getattr(self._repo, "ticker_currency_by_id", None)

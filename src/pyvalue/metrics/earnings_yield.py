@@ -22,7 +22,7 @@ from pyvalue.metrics.utils import (
     sum_money,
 )
 from pyvalue.money import Money
-from pyvalue.persistence.storage import MarketDataRepository
+from pyvalue.marketdata import MarketDataReader
 
 EPS_CONCEPTS = ["EarningsPerShare"]
 
@@ -39,7 +39,7 @@ class EarningsYieldMetric:
         self,
         listing_id: int,
         repo: RegionFactsRepository,
-        market_repo: MarketDataRepository,
+        market_repo: MarketDataReader,
     ) -> Optional[MetricResult]:
         eps = self._ttm_eps(listing_id, repo)
         if eps is None:
@@ -147,7 +147,7 @@ class EarningsYieldMetric:
         return None
 
     def _latest_snapshot(
-        self, market_repo: MarketDataRepository, listing_id: int
+        self, market_repo: MarketDataReader, listing_id: int
     ) -> Optional[PriceData]:
         if hasattr(market_repo, "latest_snapshot_by_id"):
             snapshot = market_repo.latest_snapshot_by_id(listing_id)

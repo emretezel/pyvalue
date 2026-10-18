@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import wraps
-from typing import TYPE_CHECKING, Optional, Protocol, Sequence, TypeVar
+from typing import TYPE_CHECKING, Optional, Protocol, Sequence, TypeVar, Union
 
 from pyvalue.currency import MetricUnitKind, metric_currency_or_none
 
@@ -16,6 +16,14 @@ if TYPE_CHECKING:
     # package already depends on pyvalue.facts at runtime, so importing it back
     # here eagerly would be circular.
     from pyvalue.facts import RegionFactsRepository
+    from pyvalue.marketdata import MarketDataReader
+
+    # ``TypeIs`` (PEP 742) lands in ``typing`` only with Python 3.13; on the
+    # project's 3.12 floor it comes from ``typing_extensions``, which mypy
+    # itself depends on. The import is type-checking-only (annotations are
+    # strings under ``from __future__ import annotations``), so the runtime
+    # package carries no new dependency.
+    from typing_extensions import TypeIs
 
 # wrap_metric_currency_invariants() takes a metric *class* and returns the same
 # class with its ``compute`` wrapped, so this TypeVar preserves the caller's
@@ -250,16 +258,78 @@ class MetricCurrencyInvariantError(RuntimeError):
 
 
 class Metric(Protocol):
-    """Protocol that all metric implementations must follow."""
+    """Protocol for metrics computed from financial facts alone.
 
-    id: str
-    required_concepts: Sequence[str]
-    unit_kind: MetricUnitKind
-    unit_label: Optional[str]
+    Every metric declares its id and the fact concepts it reads as class
+    attributes; ``compute`` returns ``None`` (an honest NA) when the inputs do
+    not support a value. Output-unit metadata is *not* part of the protocol:
+    only a handful of classes declare ``unit_kind``/``unit_label`` and
+    ``metadata_for_metric`` resolves the rest from its table, so the members
+    are read via ``getattr`` there rather than demanded of every class.
+
+    The members are read-only properties so that a plain class attribute of a
+    narrower type (a ``tuple[str, ...]`` for ``required_concepts``) satisfies
+    them; a settable protocol attribute would be invariant and reject it.
+    """
+
+    @property
+    def id(self) -> str: ...
+
+    @property
+    def required_concepts(self) -> Sequence[str]: ...
 
     def compute(
         self, listing_id: int, repo: RegionFactsRepository
     ) -> Optional[MetricResult]: ...
+
+
+class MarketDataMetric(Protocol):
+    """Protocol for metrics that also read the market-data seam.
+
+    Price-linked metrics (market cap, yields on EV, P/B, PEG, ...) take a
+    market-data *reader* as a third ``compute`` argument -- the read-side
+    interface in ``pyvalue.marketdata``, not the storage repository, so the
+    CLI's per-listing caching wrapper qualifies too. The class-level
+    ``uses_market_data`` flag is the runtime discriminator the CLI uses to
+    decide which repositories to open and how to call ``compute``; it is
+    declared here so the two metric shapes are told apart by the type checker
+    as well (see ``needs_market_data``).
+    """
+
+    @property
+    def id(self) -> str: ...
+
+    @property
+    def required_concepts(self) -> Sequence[str]: ...
+
+    @property
+    def uses_market_data(self) -> bool: ...
+
+    def compute(
+        self,
+        listing_id: int,
+        repo: RegionFactsRepository,
+        market_repo: MarketDataReader,
+    ) -> Optional[MetricResult]: ...
+
+
+# The registry holds both metric shapes; callers narrow with
+# ``needs_market_data`` before choosing the ``compute`` call signature.
+AnyMetric = Union[Metric, MarketDataMetric]
+
+
+def needs_market_data(metric: AnyMetric) -> TypeIs[MarketDataMetric]:
+    """Return whether ``metric`` reads the market-data seam.
+
+    A ``TypeIs`` predicate rather than a plain ``bool`` so that both branches
+    of an ``if needs_market_data(metric)`` narrow: the true branch sees a
+    ``MarketDataMetric`` (three-argument ``compute``), the false branch a
+    facts-only ``Metric`` (two-argument ``compute``). The runtime test is the
+    class flag every market-data metric declares; facts-only metrics may omit
+    the attribute entirely, which reads as ``False``.
+    """
+
+    return getattr(metric, "uses_market_data", False) is True
 
 
 def wrap_metric_currency_invariants(metric_cls: _MetricClassT) -> _MetricClassT:
@@ -307,7 +377,7 @@ def consume_metric_currency_invariant_error(
 
 
 def metadata_for_metric(
-    metric_id: str, metric: Optional[Metric] = None
+    metric_id: str, metric: Optional[AnyMetric] = None
 ) -> MetricMetadata:
     """Return explicit output-unit metadata for ``metric_id``."""
 
@@ -322,11 +392,14 @@ def metadata_for_metric(
 
 
 __all__ = [
+    "AnyMetric",
+    "MarketDataMetric",
     "Metric",
     "MetricCurrencyInvariantError",
     "MetricMetadata",
     "MetricResult",
     "consume_metric_currency_invariant_error",
     "metadata_for_metric",
+    "needs_market_data",
     "wrap_metric_currency_invariants",
 ]

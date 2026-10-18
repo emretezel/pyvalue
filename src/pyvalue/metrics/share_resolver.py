@@ -38,7 +38,8 @@ from typing import Literal, Optional
 
 from pyvalue.currency import normalize_currency_code
 from pyvalue.facts import RawFactSource
-from pyvalue.persistence.storage import FactRecord, MarketDataRepository
+from pyvalue.marketdata import MarketDataReader
+from pyvalue.persistence.storage import FactRecord
 
 LOGGER = logging.getLogger(__name__)
 
@@ -154,7 +155,7 @@ def arbitrate_share_count(
 def resolve_current_share_count(
     listing_id: int,
     repo: RawFactSource,
-    market_repo: MarketDataRepository,
+    market_repo: MarketDataReader,
 ) -> Optional[FactRecord]:
     """Return the fact carrying the best current company-total share count.
 
@@ -268,7 +269,7 @@ def _first_usable_periodic(
 def _implied_total_shares(
     listing_id: int,
     repo: RawFactSource,
-    market_repo: MarketDataRepository,
+    market_repo: MarketDataReader,
 ) -> Optional[float]:
     """Anchor-implied company-total share count, or None when unavailable.
 

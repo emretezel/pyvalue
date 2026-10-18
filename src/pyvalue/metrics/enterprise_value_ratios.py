@@ -34,7 +34,7 @@ from pyvalue.metrics.utils import (
     sum_money,
 )
 from pyvalue.money import Money
-from pyvalue.persistence.storage import MarketDataRepository
+from pyvalue.marketdata import MarketDataReader
 
 LOGGER = logging.getLogger(__name__)
 
@@ -216,7 +216,7 @@ class EBITYieldEVMetric:
         self,
         listing_id: int,
         repo: RegionFactsRepository,
-        market_repo: MarketDataRepository,
+        market_repo: MarketDataReader,
     ) -> Optional[MetricResult]:
         numerator = EnterpriseValueRatioCalculator().compute_ttm_ebit(
             listing_id, repo, context=self.id
@@ -257,7 +257,7 @@ class FCFYieldEVMetric:
         self,
         listing_id: int,
         repo: RegionFactsRepository,
-        market_repo: MarketDataRepository,
+        market_repo: MarketDataReader,
     ) -> Optional[MetricResult]:
         numerator = EnterpriseValueRatioCalculator().compute_ttm_fcf(
             listing_id, repo, context=self.id
@@ -298,7 +298,7 @@ class EVToEBITMetric:
         self,
         listing_id: int,
         repo: RegionFactsRepository,
-        market_repo: MarketDataRepository,
+        market_repo: MarketDataReader,
     ) -> Optional[MetricResult]:
         numerator = EnterpriseValueRatioCalculator().compute_ttm_ebit(
             listing_id, repo, context=self.id
@@ -345,7 +345,7 @@ class EVToEBITDAMetric:
         self,
         listing_id: int,
         repo: RegionFactsRepository,
-        market_repo: MarketDataRepository,
+        market_repo: MarketDataReader,
     ) -> Optional[MetricResult]:
         numerator = EnterpriseValueRatioCalculator().compute_ttm_ebitda(
             listing_id, repo, context=self.id
@@ -396,7 +396,7 @@ class EVToSalesMetric:
         self,
         listing_id: int,
         repo: RegionFactsRepository,
-        market_repo: MarketDataRepository,
+        market_repo: MarketDataReader,
     ) -> Optional[MetricResult]:
         revenue = EnterpriseValueRatioCalculator().compute_ttm_revenue(
             listing_id, repo, context=self.id

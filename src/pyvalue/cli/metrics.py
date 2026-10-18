@@ -35,11 +35,12 @@ from pyvalue.currency import (
 from pyvalue.marketdata import PriceData
 from pyvalue.metrics import REGISTRY
 from pyvalue.metrics.base import (
-    Metric,
+    AnyMetric,
     MetricCurrencyInvariantError,
     MetricResult,
     consume_metric_currency_invariant_error,
     metadata_for_metric,
+    needs_market_data,
 )
 from pyvalue.metrics.utils import reuse_or_bind_metric_fx_service
 from pyvalue.logging_utils import (
@@ -270,7 +271,7 @@ def _print_metric_progress_bar(completed_symbols: int, total_symbols: int) -> No
 
 def _metric_attempt_success(
     metric_id: str,
-    metric: Metric,
+    metric: AnyMetric,
     result: MetricResult,
     *,
     symbol: str,
@@ -468,7 +469,9 @@ def _compute_metrics_for_symbol_inner(
             continue
         metric = metric_cls()
         try:
-            if getattr(metric, "uses_market_data", False):
+            # ``needs_market_data`` narrows the metric to its protocol shape, so
+            # each branch calls the ``compute`` signature that shape declares.
+            if needs_market_data(metric):
                 if cached_market_repo is None:  # pragma: no cover - defensive
                     raise RuntimeError(
                         f"Metric {metric_id} requires market data but no market repo was provided."

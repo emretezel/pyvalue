@@ -26,7 +26,7 @@ from pyvalue.metrics.owner_earnings_equity import (
 )
 from pyvalue.metrics.utils import SHARE_RESOLVER_REQUIRED_CONCEPTS, market_cap_money
 from pyvalue.money import Money
-from pyvalue.persistence.storage import MarketDataRepository
+from pyvalue.marketdata import MarketDataReader
 
 LOGGER = logging.getLogger(__name__)
 
@@ -45,7 +45,7 @@ def _denominator_market_cap(
     *,
     listing_id: int,
     repo: RegionFactsRepository,
-    market_repo: MarketDataRepository,
+    market_repo: MarketDataReader,
     target_currency: str,
     context: str,
 ) -> Optional[Money]:
@@ -66,7 +66,7 @@ def _denominator_enterprise_value(
     *,
     listing_id: int,
     repo: RegionFactsRepository,
-    market_repo: MarketDataRepository,
+    market_repo: MarketDataReader,
     target_currency: str,
     context: str,
 ) -> Optional[Money]:
@@ -91,7 +91,7 @@ class OwnerEarningsYieldEquityMetric:
         self,
         listing_id: int,
         repo: RegionFactsRepository,
-        market_repo: MarketDataRepository,
+        market_repo: MarketDataReader,
     ) -> Optional[MetricResult]:
         numerator = OwnerEarningsEquityCalculator().compute_ttm(listing_id, repo)
         if numerator is None:
@@ -130,7 +130,7 @@ class OwnerEarningsYieldEquityFiveYearMetric:
         self,
         listing_id: int,
         repo: RegionFactsRepository,
-        market_repo: MarketDataRepository,
+        market_repo: MarketDataReader,
     ) -> Optional[MetricResult]:
         numerator = OwnerEarningsEquityCalculator().compute_5y_average(listing_id, repo)
         if numerator is None:
@@ -169,7 +169,7 @@ class OwnerEarningsYieldEVMetric:
         self,
         listing_id: int,
         repo: RegionFactsRepository,
-        market_repo: MarketDataRepository,
+        market_repo: MarketDataReader,
     ) -> Optional[MetricResult]:
         numerator = OwnerEarningsEnterpriseCalculator().compute_ttm(listing_id, repo)
         if numerator is None:
@@ -206,7 +206,7 @@ class OwnerEarningsYieldEVNormalizedMetric:
         self,
         listing_id: int,
         repo: RegionFactsRepository,
-        market_repo: MarketDataRepository,
+        market_repo: MarketDataReader,
     ) -> Optional[MetricResult]:
         numerator = OwnerEarningsEnterpriseCalculator().compute_5y_median(
             listing_id, repo

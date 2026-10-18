@@ -29,7 +29,7 @@ from pyvalue.metrics.utils import (
     require_metric_ticker_currency,
 )
 from pyvalue.money import Money
-from pyvalue.persistence.storage import MarketDataRepository
+from pyvalue.marketdata import MarketDataReader
 
 LOGGER = logging.getLogger(__name__)
 
@@ -69,7 +69,7 @@ class PriceToBookCalculator:
         self,
         listing_id: int,
         repo: RegionFactsRepository,
-        market_repo: MarketDataRepository,
+        market_repo: MarketDataReader,
         *,
         context: str,
     ) -> Optional[_BookValueInputs]:
@@ -177,7 +177,7 @@ class PriceToBookCalculator:
         self,
         listing_id: int,
         repo: RegionFactsRepository,
-        market_repo: MarketDataRepository,
+        market_repo: MarketDataReader,
     ) -> Optional[float]:
         record = resolve_current_share_count(listing_id, repo, market_repo)
         if record is None or not is_recent_fact(record):
@@ -197,7 +197,7 @@ class PriceToBookMetric:
         self,
         listing_id: int,
         repo: RegionFactsRepository,
-        market_repo: MarketDataRepository,
+        market_repo: MarketDataReader,
     ) -> Optional[MetricResult]:
         inputs = PriceToBookCalculator().resolve_inputs(
             listing_id, repo, market_repo, context=self.id
@@ -238,7 +238,7 @@ class PriceToTangibleBookMetric:
         self,
         listing_id: int,
         repo: RegionFactsRepository,
-        market_repo: MarketDataRepository,
+        market_repo: MarketDataReader,
     ) -> Optional[MetricResult]:
         inputs = PriceToBookCalculator().resolve_inputs(
             listing_id, repo, market_repo, context=self.id

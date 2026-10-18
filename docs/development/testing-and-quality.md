@@ -14,7 +14,12 @@ conda run -n pyvalue pytest
 ## What Each Check Covers
 
 - `ruff format`: code formatting
-- `ruff check`: linting and style problems
+- `ruff check`: linting and style problems. The rule set is pinned explicitly in
+  `[tool.ruff.lint]` in `pyproject.toml` (`E4`, `E7`, `E9`, `F`) rather than left to
+  ruff's defaults: ruff 0.16 widened those defaults to several hundred rules, which
+  would have failed a clean tree on a tool upgrade alone. Widening the selection
+  (pyupgrade, isort's `I`, timezone-aware datetimes, ...) is a deliberate change
+  with its own code sweep, made in `pyproject.toml`, never by upgrading ruff.
 - `mypy`: strict static typing on **both** `src/` and `tests/` — `[tool.mypy]` in
   `pyproject.toml` enables `disallow_untyped_defs` and `check_untyped_defs`, so every
   function (tests included) must be fully annotated and have its body type-checked.
