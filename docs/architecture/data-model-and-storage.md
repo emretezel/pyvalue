@@ -69,7 +69,11 @@ the LEI read from the fundamentals payload establishes *what* it is.
 so `issuer` models a company rather than, as before, roughly one row per
 listing. The LEI is deliberately not a `listing` column — it identifies the
 legal entity, so it belongs on `issuer.lei` and caching it here would duplicate
-that fact (migration 090 dropped it).
+that fact (migration 090 dropped it). The same pass is the only writer of
+`issuer.name` after a row is created: it names the entity after its
+vendor-primary line with the share-class designator stripped
+(`pyvalue.universe.issuer_identity`), so a company's name never depends on which
+of its listings was processed last.
 
 ### `provider_listing`
 

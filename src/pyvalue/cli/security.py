@@ -123,7 +123,6 @@ def cmd_refresh_security_metadata(
                 pending_updates.append(
                     SecurityMetadataUpdate(
                         security_id=listing_id,
-                        entity_name=metadata_candidate.entity_name,
                         description=metadata_candidate.description,
                         sector=metadata_candidate.sector,
                         industry=metadata_candidate.industry,

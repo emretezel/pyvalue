@@ -180,9 +180,10 @@ class FundamentalsRepository(SQLiteStore):
                 # fundamentals_raw. Routing through the view forced three extra
                 # per-row B-tree seeks (listing, issuer, exchange) that yield no
                 # column we read -- ~3x the table touches for each of ~75k raw
-                # payloads on a full refresh. No ORDER BY either: rows are merged
-                # into a dict keyed by security_id and the EODHD-over-SEC
-                # precedence is handled by the merge below, not by row order.
+                # payloads on a full refresh. No ORDER BY either: rows land in a
+                # dict keyed by security_id, and only EODHD rows contribute
+                # fields -- an SEC payload carries nothing but an entity name,
+                # which the reconciler derives and this command never promotes.
                 rows = conn.execute(
                     f"""
                     SELECT
@@ -206,34 +207,20 @@ class FundamentalsRepository(SQLiteStore):
                         continue
 
                     security_id = int(row["security_id"])
-                    payload = json.loads(row["data"])
-                    current = results.get(security_id) or SecurityMetadataCandidate()
-
-                    if provider == "EODHD":
-                        general = payload.get("General") or {}
-                        eodhd_entity_name = _normalize_optional_text(
-                            general.get("Name")
-                        )
-                        results[security_id] = SecurityMetadataCandidate(
-                            entity_name=eodhd_entity_name or current.entity_name,
-                            description=_normalize_optional_text(
-                                general.get("Description")
-                            ),
-                            sector=_normalize_optional_text(general.get("Sector")),
-                            industry=_normalize_optional_text(general.get("Industry")),
-                        )
+                    # Every recognised payload registers its listing, so one whose
+                    # only payload yields no fields is reported by the CLI as
+                    # "nothing extractable" rather than "no raw payload".
+                    results.setdefault(security_id, SecurityMetadataCandidate())
+                    if provider != "EODHD":
                         continue
-
-                    sec_entity_name = _normalize_optional_text(
-                        payload.get("entityName")
+                    general = json.loads(row["data"]).get("General") or {}
+                    results[security_id] = SecurityMetadataCandidate(
+                        description=_normalize_optional_text(
+                            general.get("Description")
+                        ),
+                        sector=_normalize_optional_text(general.get("Sector")),
+                        industry=_normalize_optional_text(general.get("Industry")),
                     )
-                    if current.entity_name is None and sec_entity_name is not None:
-                        results[security_id] = SecurityMetadataCandidate(
-                            entity_name=sec_entity_name,
-                            description=current.description,
-                            sector=current.sector,
-                            industry=current.industry,
-                        )
         return results
 
     def fetch_payload_with_hash_by_id(

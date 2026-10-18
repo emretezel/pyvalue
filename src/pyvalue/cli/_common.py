@@ -133,7 +133,6 @@ class _NormalizedFactsResult:
     symbol: str
     rows: Tuple[StoredFactRow, ...]
     payload_hash: str
-    entity_name: Optional[str] = None
     entity_description: Optional[str] = None
     entity_sector: Optional[str] = None
     entity_industry: Optional[str] = None
@@ -754,11 +753,6 @@ def _print_symbol_progress(completed_symbols: int, total_symbols: int) -> None:
         f"Progress: {completed_symbols}/{total_symbols} symbols complete ({percent:.1f}%)",
         flush=True,
     )
-
-
-def _extract_entity_name_from_eodhd(payload: Dict) -> Optional[str]:
-    general = payload.get("General") or {}
-    return general.get("Name") or general.get("Code")
 
 
 def _extract_entity_description_from_eodhd(payload: Dict) -> Optional[str]:

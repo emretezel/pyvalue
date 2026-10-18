@@ -5,9 +5,19 @@ Author: Emre Tezel
 
 from __future__ import annotations
 
+import re
 from typing import Optional
 
-from pyvalue.universe.issuer_identity import ListingIdentity, group_listings
+import pytest
+from hypothesis import assume, given
+from hypothesis import strategies as st
+
+from pyvalue.universe.issuer_identity import (
+    VENDOR_PRIMARY_LINE,
+    ListingIdentity,
+    entity_name_from_security_name,
+    group_listings,
+)
 
 
 def _identity(
@@ -18,6 +28,7 @@ def _identity(
     lei: Optional[str] = None,
     entity_name: Optional[str] = None,
     is_primary: bool = False,
+    home_category: Optional[str] = None,
 ) -> ListingIdentity:
     return ListingIdentity(
         listing_id=listing_id,
@@ -26,6 +37,7 @@ def _identity(
         lei=lei,
         entity_name=entity_name,
         is_primary=is_primary,
+        home_category=home_category,
     )
 
 
@@ -172,6 +184,202 @@ def test_group_name_falls_back_deterministically() -> None:
     )
 
     assert groups[0].name == "First"
+
+
+def test_vendor_primary_line_outranks_the_lowest_id_primary() -> None:
+    """Molson Coors: both US classes are primary; the vendor tag decides.
+
+    TAP-A has the lower id and the lowest-id tie-break used to name the company
+    after it. EODHD marks TAP ``Domestic Primary``, and that line's name (minus
+    its class designator) is the company's.
+    """
+
+    lei = "5493003R4M6ORNX6F371"
+    groups = group_listings(
+        [
+            _identity(
+                1,
+                10,
+                lei=lei,
+                entity_name="Molson Coors Beverage Company",
+                is_primary=True,
+                home_category="DOMESTIC SECONDARY",
+            ),
+            _identity(
+                2,
+                20,
+                lei=lei,
+                entity_name="Molson Coors Brewing Co Class B",
+                is_primary=True,
+                home_category=VENDOR_PRIMARY_LINE,
+            ),
+        ]
+    )
+
+    assert groups[0].name == "Molson Coors Brewing Co"
+
+
+def test_vendor_primary_line_outranks_a_preferred_series() -> None:
+    """Bank of America: seventeen preferred lines are all classified primary.
+
+    The live row was named after a Merrill Lynch preferred. The common stock is
+    the only line tagged ``Domestic Primary`` and it names the company.
+    """
+
+    lei = "9DJT3UXIJIZJI4WXO774"
+    groups = group_listings(
+        [
+            _identity(
+                1,
+                10,
+                lei=lei,
+                entity_name=(
+                    "Bank of America Corporation Non Cumulative Perpetual Conv Pfd Ser L"
+                ),
+                is_primary=True,
+                home_category="DOMESTIC PREFERRED",
+            ),
+            _identity(
+                2,
+                20,
+                lei=lei,
+                entity_name="Bank of America Corp",
+                is_primary=True,
+                home_category=VENDOR_PRIMARY_LINE,
+            ),
+            _identity(
+                3,
+                30,
+                lei=lei,
+                entity_name="Merrill Lynch Capital Trust I GTD CAP 6.45%",
+                is_primary=True,
+                home_category="DOMESTIC PREFERRED",
+            ),
+        ]
+    )
+
+    assert groups[0].name == "Bank of America Corp"
+
+
+def test_vendor_primary_line_outranks_classification() -> None:
+    """The vendor's tag wins even over a line the classifier calls primary.
+
+    Both lines are the same company; the tag is the vendor saying which one *is*
+    the company, and classification has no opinion between share classes.
+    """
+
+    lei = "5493000BD5GJNUDIUG10"
+    groups = group_listings(
+        [
+            _identity(1, 10, lei=lei, entity_name="Acme Holdings ADR", is_primary=True),
+            _identity(
+                2,
+                20,
+                lei=lei,
+                entity_name="Acme Holdings Inc Class A",
+                is_primary=False,
+                home_category=VENDOR_PRIMARY_LINE,
+            ),
+        ]
+    )
+
+    assert groups[0].name == "Acme Holdings Inc"
+
+
+def test_share_classes_that_tie_on_every_tier_still_agree_on_a_name() -> None:
+    """Alphabet with no vendor tag: GOOG wins the id tie-break, yet the stripped
+    names coincide, so the issuer is "Alphabet Inc" rather than Class C."""
+
+    lei = "5493006MHB84DD0ZWV18"
+    groups = group_listings(
+        [
+            _identity(
+                1,
+                10,
+                isin="US02079K1079",
+                lei=lei,
+                entity_name="Alphabet Inc Class C",
+                is_primary=True,
+            ),
+            _identity(
+                2,
+                20,
+                isin="US02079K3059",
+                lei=lei,
+                entity_name="Alphabet Inc Class A",
+                is_primary=True,
+            ),
+        ]
+    )
+
+    assert groups[0].name == "Alphabet Inc"
+
+
+@pytest.mark.parametrize(
+    ("security_name", "entity_name"),
+    [
+        ("Alphabet Inc Class A", "Alphabet Inc"),
+        ("Alphabet Inc Class C", "Alphabet Inc"),
+        ("Zillow Group Inc Class C", "Zillow Group Inc"),
+        ("Liberty Broadband Srs A", "Liberty Broadband"),
+        ("DoorDash, Inc. Class A Common Stock", "DoorDash, Inc."),
+        ("Able View Global Inc. Class B Ordinary Shares", "Able View Global Inc."),
+        (
+            "Activate Energy Acquisition Corp. Class A Ordinary Share",
+            "Activate Energy Acquisition Corp.",
+        ),
+        ("ALPHABET INC.CL A", "ALPHABET INC."),
+        ("Foo Corp - Class A", "Foo Corp"),
+        ("  Berkshire Hathaway Inc  ", "Berkshire Hathaway Inc"),
+    ],
+)
+def test_entity_name_strips_a_trailing_share_class_designator(
+    security_name: str, entity_name: str
+) -> None:
+    assert entity_name_from_security_name(security_name) == entity_name
+
+
+@pytest.mark.parametrize(
+    "security_name",
+    [
+        # A bare letter is not a designator we can read safely.
+        "Under Armour Inc A",
+        "News Corp A",
+        # Mid-name designators (tracking stocks) are left alone.
+        "Liberty Media Corporation Series A Liberty Formula One Common Stock",
+        # Receipt and vote markers after the class are not stripped either.
+        "Alphabet Inc Class A CEDEAR",
+        "Nio Inc Class A ADR",
+        "Banco de Galicia y Buenos Aires SA Class B 1 Vote",
+        # The keyword as a word of the company name.
+        "Class Editori SpA",
+        "Bank of America Corp",
+        # A name that is nothing but a designator is kept, not emptied.
+        "Class A",
+    ],
+)
+def test_entity_name_leaves_other_names_unchanged(security_name: str) -> None:
+    assert entity_name_from_security_name(security_name) == security_name
+
+
+_DESIGNATOR_KEYWORD = re.compile(r"(?i)\b(?:class|cl|series|ser|srs)\b")
+
+
+@given(st.text())
+def test_entity_name_is_idempotent_and_only_removes_a_suffix(name: str) -> None:
+    once = entity_name_from_security_name(name)
+
+    assert entity_name_from_security_name(once) == once
+    assert name.strip().startswith(once)
+    # ``issuer.name`` is NOT NULL: a non-blank input never becomes blank.
+    assert (once == "") == (name.strip() == "")
+
+
+@given(st.text())
+def test_entity_name_without_a_designator_keyword_is_only_trimmed(name: str) -> None:
+    assume(_DESIGNATOR_KEYWORD.search(name) is None)
+
+    assert entity_name_from_security_name(name) == name.strip()
 
 
 def test_listings_without_identifiers_stay_separate() -> None:

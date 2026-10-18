@@ -54,12 +54,92 @@ about roughly a quarter of all receipts.
 
 Every link rests on an identifier, never on one name resembling another -- which
 is what makes the grouping safe to apply wholesale.
+
+Naming the entity
+-----------------
+Grouping also decides what the merged ``issuer`` row is *called*, and that is
+the one place names enter this module -- as output, never as evidence. EODHD's
+``General.Name`` is a *security* name: it carries the share class ("Alphabet Inc
+Class A" / "Alphabet Inc Class C"), so no listing's name is the company's name
+as such. The issuer row models the legal entity, so the group's name is derived
+in two steps, both pure and both pinned by tests:
+
+1. Choose the listing whose name describes the company best. The vendor says
+   which line that is: ``HomeCategory`` reads ``Domestic Primary`` on the main
+   share line and ``Domestic Secondary`` / ``Domestic Preferred`` on the others
+   (GOOGL over GOOG, BRK-B over BRK-A, BAC over its seventeen preferred series).
+   Classification cannot make that call, because both share classes self-declare
+   ``PrimaryTicker`` and are *both* primary. Where the vendor is silent the
+   classification-primary line wins, then the lowest listing id.
+2. Strip the trailing share-class designator from that name
+   (:func:`entity_name_from_security_name`), so Alphabet is "Alphabet Inc" and not
+   the name of whichever class happened to sort first.
+
+The reconciler is the only writer of ``issuer.name`` after the row is created.
+It used to be one of four -- ``normalize-fundamentals``,
+``refresh-security-metadata`` and ``refresh-supported-tickers`` each rewrote the
+name with the security name of whichever listing they processed last, which is
+how Bank of America's row came to be called after a Merrill Lynch preferred.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Dict, Final, Iterable, List, Optional, Sequence, Set, Tuple
+
+# EODHD's ``General.HomeCategory`` value marking the line the vendor itself
+# treats as the company's primary share class. Stored uppercased, matching how
+# ``ListingEvidence.home_category`` normalizes the field. Only this one value is
+# read here: ``Domestic Secondary`` and ``Domestic Preferred`` say "not this one"
+# by not being it, and the depositary values belong to the classifier.
+VENDOR_PRIMARY_LINE: Final[str] = "DOMESTIC PRIMARY"
+
+# A trailing share-class designator on a vendor security name. Anchored at the
+# end and matched case-insensitively: an optional separator, one of the
+# designator keywords EODHD actually uses, a single class letter, and optionally
+# the security type the US feeds append ("Class A Common Stock", "Class A
+# Ordinary Shares"). Surveyed over the 71,543 stored payloads: ~1,090 names end
+# this way. Bare letters ("Under Armour Inc A"), mid-name designators (Liberty's
+# tracking stocks) and receipt markers ("... Class A CEDEAR") are deliberately
+# left alone -- stripping them would need guessing, and a slightly longer name
+# is harmless where a wrong one is not.
+_SHARE_CLASS_SUFFIX: Final[re.Pattern[str]] = re.compile(
+    r"""
+    [\s,-]*                                        # separator before the designator
+    \b(?:class|cl\.?|series|ser\.?|srs\.?)         # designator keyword
+    \s+[A-Za-z]                                    # the class letter
+    (?:\s+(?:common\s+stock|ordinary\s+shares?|shares?|stock))?  # security type
+    \s*$
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def entity_name_from_security_name(security_name: str) -> str:
+    """Return the legal entity's name implied by a vendor security name.
+
+    Strips one trailing share-class designator (see ``_SHARE_CLASS_SUFFIX``) from
+    the trimmed name: ``"Alphabet Inc Class A"`` -> ``"Alphabet Inc"``,
+    ``"DoorDash, Inc. Class A Common Stock"`` -> ``"DoorDash, Inc."``. Names
+    without one are returned trimmed and otherwise unchanged. A name that *is*
+    only a designator is returned as given rather than emptied, because
+    ``issuer.name`` is NOT NULL and a bad name beats no name.
+
+    Idempotent, and the result is always a prefix of the trimmed input -- the
+    function only ever removes a suffix. Both properties are test-pinned. The
+    strip runs to a fixpoint rather than once, which is what makes idempotence
+    hold for the (unobserved) case of two stacked designators.
+    """
+
+    trimmed = security_name.strip()
+    current = trimmed
+    while True:
+        stripped = _SHARE_CLASS_SUFFIX.sub("", current, count=1).rstrip()
+        if stripped == current or not stripped:
+            break
+        current = stripped
+    return current or trimmed
 
 
 @dataclass(frozen=True)
@@ -73,11 +153,16 @@ class ListingIdentity:
         lei: ``General.LEI`` from the listing's stored payload, already
             shape-normalized, or None. Read from the payload rather than a
             column: caching it on ``listing`` duplicated ``issuer.lei``.
-        entity_name: The issuer name currently recorded for this listing, used
-            to name a merged group.
+        entity_name: This listing's security name (``General.Name`` when the
+            payload has one, else the issuer name currently stored), one of the
+            candidates for naming the merged group.
         is_primary: Whether the listing is classified ``primary``. Only a
             tie-break for which name the merged issuer keeps -- a company is
             best described by the name on its primary line.
+        home_category: ``General.HomeCategory``, uppercased, or None. Read for
+            one value only, :data:`VENDOR_PRIMARY_LINE`, which outranks
+            ``is_primary`` when choosing the name: two share classes are both
+            primary, and only the vendor says which one is the company.
     """
 
     listing_id: int
@@ -86,6 +171,7 @@ class ListingIdentity:
     lei: Optional[str] = None
     entity_name: Optional[str] = None
     is_primary: bool = False
+    home_category: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -252,21 +338,45 @@ def group_listings(
 def _group_name(members: Sequence[ListingIdentity]) -> Optional[str]:
     """Choose the name a merged issuer keeps.
 
-    The primary listing's name wins: a company is best described by the name on
-    the line that actually is the company, not by an ADR's ``... PLC ADR`` or a
-    German regional line's abbreviated ``NEMETSCHEK SE O.N.``. Ties fall back to
-    the lowest listing id so the choice is deterministic across runs.
+    Three tiers, each a tie-break for the one above:
+
+    1. The line the vendor marks ``Domestic Primary``. Share classes are all
+       classified primary (each self-declares ``PrimaryTicker``), so without this
+       Alphabet was named after whichever of GOOG/GOOGL had the lower listing
+       id -- "Alphabet Inc Class C" -- and Bank of America after a preferred.
+    2. A classification-primary line: a company is best described by the line
+       that actually is the company, not by an ADR's ``... PLC ADR`` or a German
+       regional line's abbreviated ``NEMETSCHEK SE O.N.``.
+    3. The lowest listing id, so the choice is deterministic across runs.
+
+    The chosen *security* name is then reduced to the entity's name by
+    :func:`entity_name_from_security_name`, which is also why two classes that
+    tie on every tier still agree: "Alphabet Inc Class A" and "Alphabet Inc
+    Class C" both become "Alphabet Inc".
     """
 
     named = [member for member in members if member.entity_name]
     if not named:
         return None
-    named.sort(key=lambda member: (not member.is_primary, member.listing_id))
-    return named[0].entity_name
+    best = min(
+        named,
+        key=lambda member: (
+            member.home_category != VENDOR_PRIMARY_LINE,
+            not member.is_primary,
+            member.listing_id,
+        ),
+    )
+    # ``named`` is filtered on entity_name, so this branch cannot be taken; it
+    # narrows the Optional honestly instead of asserting it away.
+    if best.entity_name is None:
+        return None
+    return entity_name_from_security_name(best.entity_name)
 
 
 __all__ = [
+    "VENDOR_PRIMARY_LINE",
     "IssuerGroup",
     "ListingIdentity",
+    "entity_name_from_security_name",
     "group_listings",
 ]

@@ -165,6 +165,11 @@ Notes:
 - the sole writer of `issuer.lei`, and the only path that merges issuer rows in
   bulk; it repoints listings onto the group's lowest `issuer_id` and deletes the
   emptied rows, all in one transaction
+- the only writer of `issuer.name` once a row exists: the group is named after
+  the line EODHD marks `HomeCategory: Domestic Primary`, else the classified
+  primary, else the lowest listing id, with the trailing share-class designator
+  stripped — "Alphabet Inc", not "Alphabet Inc Class C". The per-listing
+  metadata commands never rename (see `docs/providers/eodhd.md`)
 - safe to repeat: a catalog already matching the derived shape issues no writes
 - it does **not** link a depositary receipt to its underlying — they are
   different securities with different ISINs and receipts rarely carry an LEI
@@ -585,8 +590,9 @@ Key options:
 Notes:
 
 - offline only; makes no network requests
-- updates canonical `issuer` metadata such as entity name, description,
-  sector, and industry
+- fills gaps in canonical `issuer` metadata (description, sector, industry)
+  with never-overwrite semantics; it does **not** write `issuer.name`, which the
+  universe reconciler derives per legal entity (`reconcile-issuer-identity`)
 - intended for metadata backfills after ingesting raw fundamentals
 
 ## Maintenance Commands

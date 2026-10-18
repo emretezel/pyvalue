@@ -23,6 +23,7 @@ from pyvalue.currency import (
     raw_currency_code,
     shaped_currency_code,
 )
+from pyvalue.universe.issuer_identity import entity_name_from_security_name
 
 from .base import (
     SQLITE_MAX_BOUND_PARAMETERS,
@@ -289,29 +290,23 @@ class SecurityRepository(SQLiteStore):
         self,
         conn: sqlite3.Connection,
         listing_id: int,
-        entity_name: Optional[str],
         description: Optional[str],
         sector: Optional[str],
         industry: Optional[str],
     ) -> bool:
-        """Apply payload metadata to a listing's issuer.
+        """Fill gaps in a listing's issuer metadata from a payload.
 
-        A plain never-overwrite update: the payload fills NULL columns and a
-        supplied name replaces the stored one, but nothing already recorded is
-        cleared.
+        A plain never-overwrite update: the payload fills NULL columns and
+        nothing already recorded is cleared or replaced.
 
-        This used to be far more than that. While ``UNIQUE (name, country)`` was
-        issuer identity, a rename could collide with a different issuer row, and
-        rather than let the index abort the whole refresh transaction this method
-        *merged* the two -- repointing every listing and deleting the loser.
-        That merge was the mechanism that fused unrelated companies into shared
-        parent rows, because a provider restyling one listing's name onto
-        another's is not evidence that they are the same business.
-
-        Migration 089 replaced name-based identity with the LEI and dropped the
-        index, so there is no collision to handle and no reason to merge on a
-        name. Entity grouping now belongs to ``reconcile-issuer-identity``, which
-        works strictly from ISIN and LEI.
+        ``issuer.name`` is deliberately not among the columns. It is owned by the
+        universe reconciler (``pyvalue.universe.issuer_identity``), which derives
+        one name per legal entity from every listing's evidence. This method used
+        to write it too, as did the catalog refresh -- each with the *security*
+        name of whichever listing it happened to process last -- so a shared
+        issuer's name flipped between its share classes on every normalize, and
+        Bank of America's row ended up named after a Merrill Lynch preferred.
+        One writer, one name.
 
         Returns True when an issuer write was issued, False when the listing does
         not exist.
@@ -330,13 +325,12 @@ class SecurityRepository(SQLiteStore):
         conn.execute(
             """
             UPDATE issuer
-            SET name = COALESCE(?, name),
-                description = COALESCE(?, description),
+            SET description = COALESCE(?, description),
                 sector = COALESCE(?, sector),
                 industry = COALESCE(?, industry)
             WHERE issuer_id = ?
             """,
-            (entity_name, description, sector, industry, int(current["issuer_id"])),
+            (description, sector, industry, int(current["issuer_id"])),
         )
         return True
 
@@ -347,17 +341,16 @@ class SecurityRepository(SQLiteStore):
         ticker: str,
         canonical_symbol: str,
         entity_name: Optional[str],
-        description: Optional[str],
-        sector: Optional[str],
-        industry: Optional[str],
         listing_currency: Optional[str],
     ) -> Optional[Security]:
-        """Create or update the issuer + listing for an already-resolved exchange.
+        """Create the issuer + listing for an already-resolved exchange, if absent.
 
         ``exchange_id`` must reference an existing ``exchange`` row -- this helper
         never writes the exchange catalog (that ownership belongs to
-        refresh-supported-exchanges). Shared by :meth:`ensure` (which resolves the
-        exchange by code) and :meth:`ensure_with_exchange_id` (handed the id).
+        refresh-supported-exchanges). An existing listing is returned untouched:
+        the caller syncs the currency and ISIN it owns, and the issuer's name
+        belongs to the reconciler once the row exists, so a catalog restyling of
+        the security name is not applied here.
         """
         security = self._load_by_exchange_and_symbol(conn, exchange_id, ticker)
         if security is None:
@@ -368,27 +361,19 @@ class SecurityRepository(SQLiteStore):
                     "refresh-supported-tickers payload currency; there is "
                     "no currency fallback."
                 )
-            # migration 064 enforces issuer.name NOT NULL. Use the
-            # canonical_symbol as a placeholder name when the caller doesn't
-            # supply one; downstream metadata refreshes can promote it to the
-            # real entity name.
-            cursor = conn.execute(
-                """
-                INSERT INTO issuer (
-                    name,
-                    description,
-                    sector,
-                    industry,
-                    country
-                ) VALUES (?, ?, ?, ?, NULL)
-                """,
-                (
-                    entity_name or canonical_symbol,
-                    description,
-                    sector,
-                    industry,
-                ),
+            # migration 064 enforces issuer.name NOT NULL. The row is born with
+            # the entity name implied by the catalog's *security* name -- share
+            # class designator stripped, so a freshly catalogued "Alphabet Inc
+            # Class A" already agrees with what the reconciler will derive -- or
+            # with the canonical symbol as a placeholder when the catalog
+            # supplies no name. Ingest's reconcile pass promotes it from the
+            # stored payload either way.
+            name = (
+                entity_name_from_security_name(entity_name)
+                if entity_name
+                else canonical_symbol
             )
+            cursor = conn.execute("INSERT INTO issuer (name) VALUES (?)", (name,))
             if cursor.lastrowid is None:
                 raise RuntimeError(f"Failed to create issuer for {canonical_symbol}")
             issuer_id = int(cursor.lastrowid)
@@ -403,18 +388,6 @@ class SecurityRepository(SQLiteStore):
                 """,
                 (issuer_id, exchange_id, ticker, listing_currency),
             )
-        else:
-            # A payload rename may land on an existing (name, country)
-            # identity; the helper merges instead of violating
-            # idx_issuer_name_country (which aborted whole refreshes before).
-            self._apply_issuer_metadata(
-                conn,
-                security.security_id,
-                entity_name,
-                description,
-                sector,
-                industry,
-            )
         return self._load_by_exchange_and_symbol(conn, exchange_id, ticker)
 
     def ensure_with_exchange_id(
@@ -423,19 +396,18 @@ class SecurityRepository(SQLiteStore):
         canonical_exchange_code: str,
         canonical_ticker: str,
         entity_name: Optional[str] = None,
-        description: Optional[str] = None,
-        sector: Optional[str] = None,
-        industry: Optional[str] = None,
         *,
         currency: Optional[str] = None,
         connection: sqlite3.Connection,
     ) -> Security:
-        """Create/update the issuer + listing against an ALREADY-RESOLVED exchange.
+        """Create the issuer + listing against an ALREADY-RESOLVED exchange.
 
-        Unlike :meth:`ensure`, this never touches the ``exchange`` table: the
-        caller resolved ``exchange_id`` from an existing row, because the exchange
-        catalog is owned by refresh-supported-exchanges. ``canonical_exchange_code``
-        is used only to build the canonical symbol / placeholder name. A live
+        This never touches the ``exchange`` table: the caller resolved
+        ``exchange_id`` from an existing row, because the exchange catalog is
+        owned by refresh-supported-exchanges. ``canonical_exchange_code`` is used
+        only to build the canonical symbol / placeholder name. ``entity_name`` is
+        the catalog's security name and is read only when the issuer row is
+        created -- afterwards the reconciler owns ``issuer.name``. A live
         ``connection`` is required -- every caller runs inside a refresh
         transaction.
         """
@@ -450,9 +422,6 @@ class SecurityRepository(SQLiteStore):
             ticker,
             canonical_symbol,
             _normalize_optional_text(entity_name),
-            _normalize_optional_text(description),
-            _normalize_optional_text(sector),
-            _normalize_optional_text(industry),
             raw_currency_code(currency),
         )
         if loaded is None:  # pragma: no cover - defensive
@@ -608,20 +577,18 @@ class SecurityRepository(SQLiteStore):
     ) -> int:
         """Persist many canonical metadata updates in one transaction.
 
-        Each row goes through :meth:`_apply_issuer_metadata` rather than a
-        blind batched UPDATE: a promoted ``General.Name`` can land on an
-        existing ``(name, country)`` identity, and the helper merges the two
-        issuer rows instead of letting ``idx_issuer_name_country`` abort the
-        whole batch. Callers pass small batches (normalize: one row per unit;
-        the metadata CLI: pre-filtered chunks), so the per-row point seeks are
-        not a measurable cost. Returns the number of updates applied to an
-        existing listing.
+        Each row goes through :meth:`_apply_issuer_metadata`, a never-overwrite
+        gap-fill of ``description`` / ``sector`` / ``industry`` on the listing's
+        issuer. The entity name is not among the fields on purpose -- see that
+        method for why it belongs to the reconciler. Callers pass small batches
+        (normalize: one row per unit; the metadata CLI: pre-filtered chunks), so
+        the per-row point seeks are not a measurable cost. Returns the number of
+        updates applied to an existing listing.
         """
 
         self.initialize_schema()
         rows = [
             (
-                _normalize_optional_text(update.entity_name),
                 _normalize_optional_text(update.description),
                 _normalize_optional_text(update.sector),
                 _normalize_optional_text(update.industry),
@@ -630,8 +597,7 @@ class SecurityRepository(SQLiteStore):
             for update in updates
             if update.security_id
             and (
-                update.entity_name is not None
-                or update.description is not None
+                update.description is not None
                 or update.sector is not None
                 or update.industry is not None
             )
@@ -642,11 +608,10 @@ class SecurityRepository(SQLiteStore):
         security_ids = [row[-1] for row in rows]
         updated = 0
         with self._connect() as conn:
-            for entity_name, description, sector, industry, security_id in rows:
+            for description, sector, industry, security_id in rows:
                 if self._apply_issuer_metadata(
                     conn,
                     security_id,
-                    entity_name,
                     description,
                     sector,
                     industry,

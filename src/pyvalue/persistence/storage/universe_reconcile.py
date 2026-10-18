@@ -230,7 +230,8 @@ class UniverseReconciler:
 
     Classification and issuer identity are not independent, so they are not
     computed independently. Grouping names a merged issuer after its *primary*
-    listing, which means it needs the fresh classification; running one without
+    listing (the vendor-marked primary share class first, then the classified
+    primary), which means it needs the fresh classification; running one without
     the other leaves the catalog internally inconsistent. They were built in
     separate phases and that is the only reason they were ever separate.
 
@@ -306,10 +307,17 @@ class UniverseReconciler:
         statuses_changed = self._status_repo.upsert_many(records, connection=conn)
 
         # Identity reads the statuses back, so it must follow the write above.
-        # The names come from the read above, so grouping never re-opens a
-        # payload just to fetch one.
+        # The names and vendor home categories come from the read above, so
+        # grouping never re-opens a payload just to fetch either. The category
+        # is what lets the grouper name a multi-class company after the line the
+        # vendor marks primary instead of whichever class sorts first.
+        home_categories = {
+            item.listing_id: item.home_category
+            for item in evidence
+            if item.home_category is not None
+        }
         identities = self._issuer_repo.load_identities(
-            conn, neighbourhood, batch.payload_names
+            conn, neighbourhood, batch.payload_names, home_categories
         )
         groups = group_listings(identities)
         applied = self._issuer_repo.apply_groups(conn, groups, vacated)

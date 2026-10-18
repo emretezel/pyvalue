@@ -320,13 +320,18 @@ class SupportedTickerRepository(SQLiteStore):
         only classification precision.
 
         Skip-unchanged: a re-refresh re-sees rows that already match everything
-        this command owns (``listing.currency``, ``listing.isin``,
-        ``issuer.name``, and the ``provider_listing`` mapping). When the stored
-        state already matches, every write would be a no-op, so a single
-        base-table read detects that and returns early -- a steady-state
-        re-refresh then issues zero writes. Anything new or changed (new ticker,
-        currency correction, ISIN arriving, name promotion, stale mapping) falls
-        through to the write path.
+        this command owns (``listing.currency``, ``listing.isin``, and the
+        ``provider_listing`` mapping). When the stored state already matches,
+        every write would be a no-op, so a single base-table read detects that
+        and returns early -- a steady-state re-refresh then issues zero writes.
+        Anything new or changed (new ticker, currency correction, ISIN arriving,
+        stale mapping) falls through to the write path.
+
+        ``entity_name`` is read only when the issuer row is *created*: the
+        reconciler owns ``issuer.name`` afterwards, deriving one name per legal
+        entity from the stored payloads, so a catalog restyling of an existing
+        listing's security name is neither a change this command detects nor one
+        it applies.
         """
         # Listings must carry a currency (listing.currency is NOT NULL, carries
         # the 3-letter shape CHECK, and there is no fallback). A catalog entry
@@ -336,7 +341,6 @@ class SupportedTickerRepository(SQLiteStore):
         quote_currency = shaped_currency_code(currency)
         if quote_currency is None:
             return False
-        normalized_name = _normalize_optional_text(entity_name)
         security_isin = shaped_isin(isin)
         # Change-detection read against base tables (never the catalog view). The
         # l.exchange_id / l.symbol predicates also confirm the existing
@@ -344,10 +348,9 @@ class SupportedTickerRepository(SQLiteStore):
         # fails the match and is repaired by the write path below.
         current = conn.execute(
             """
-            SELECT l.currency AS currency, l.isin AS isin, i.name AS name
+            SELECT l.currency AS currency, l.isin AS isin
             FROM provider_listing pl
             JOIN listing l ON l.listing_id = pl.listing_id
-            JOIN issuer i ON i.issuer_id = l.issuer_id
             WHERE pl.provider_exchange_id = ?
               AND pl.provider_symbol = ?
               AND l.exchange_id = ?
@@ -355,16 +358,13 @@ class SupportedTickerRepository(SQLiteStore):
             """,
             (provider_exchange_id, bare_symbol, exchange_id, bare_symbol),
         ).fetchone()
-        # The refresh only writes issuer.name when entity_name is supplied
-        # (COALESCE keeps the stored name otherwise), so a NULL payload name is
-        # always "unchanged" for the name dimension. The ISIN clause mirrors
-        # that: a payload without an ISIN never counts as a change, so a
-        # provider that stops publishing one cannot erase a stored identifier
-        # (and cannot force a write on every steady-state re-refresh).
+        # The ISIN clause is asymmetric on purpose: a payload without an ISIN
+        # never counts as a change, so a provider that stops publishing one
+        # cannot erase a stored identifier (and cannot force a write on every
+        # steady-state re-refresh).
         if (
             current is not None
             and current["currency"] == quote_currency
-            and (normalized_name is None or current["name"] == normalized_name)
             and (security_isin is None or current["isin"] == security_isin)
         ):
             return True

@@ -52,6 +52,7 @@ class IssuerIdentityRepository(SQLiteStore):
         conn: sqlite3.Connection,
         listing_ids: Optional[Iterable[int]] = None,
         payload_names: Optional[Mapping[int, str]] = None,
+        home_categories: Optional[Mapping[int, str]] = None,
     ) -> List[ListingIdentity]:
         """Read entity evidence for ``listing_ids`` (all listings when None).
 
@@ -93,6 +94,12 @@ class IssuerIdentityRepository(SQLiteStore):
         It also keeps listings with no stored payload: those still have an ISIN
         and a current issuer and must be grouped, not dropped -- ~4,400 catalog
         holdovers are in exactly that state.
+
+        ``home_categories`` rides along for the same reason as the names: the
+        grouper names a multi-class company after the line the vendor marks
+        ``Domestic Primary``, and the classification read has already extracted
+        ``General.HomeCategory`` for every listing in the neighbourhood. A listing
+        absent from the mapping simply carries no category.
         """
 
         select = """
@@ -127,6 +134,7 @@ class IssuerIdentityRepository(SQLiteStore):
                     ).fetchall()
                 )
         names: Mapping[int, str] = payload_names or {}
+        categories: Mapping[int, str] = home_categories or {}
         return [
             ListingIdentity(
                 listing_id=int(row["listing_id"]),
@@ -135,6 +143,7 @@ class IssuerIdentityRepository(SQLiteStore):
                 lei=shaped_lei(row["lei"]),
                 entity_name=names.get(int(row["listing_id"]), row["stored_name"]),
                 is_primary=str(row["status"]) == "primary",
+                home_category=categories.get(int(row["listing_id"])),
             )
             for row in rows
         ]
@@ -309,7 +318,9 @@ class IssuerIdentityRepository(SQLiteStore):
         The name is written unconditionally. Migration 089 dropped
         ``UNIQUE (name, country)`` precisely so it can be: names are descriptive
         metadata, not identity, and two unrelated entities may legitimately share
-        one. The LEI probe stays because ``issuer.lei`` *is* UNIQUE -- though
+        one. This is also the *only* place ``issuer.name`` changes after the row
+        is created -- the per-listing metadata writers stopped touching it, so
+        the name the grouper derives is the name that stays. The LEI probe stays because ``issuer.lei`` *is* UNIQUE -- though
         ``group_listings`` gives each LEI to exactly one group, so a collision
         can only be a stale value left by an earlier run under different
         evidence.

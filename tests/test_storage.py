@@ -81,12 +81,17 @@ def _seed_listing(
     *,
     currency: str = "USD",
     provider: str = "EODHD",
+    name: Optional[str] = None,
 ) -> None:
     """Create a cataloged listing carrying a currency so repos (which no
     longer auto-create currency-less listings) can attach data to it.
 
     The provider defaults to EODHD; pass ``provider="SEC"`` for tests that
     upsert SEC fundamentals so the matching SEC provider listing exists.
+
+    ``name`` becomes the issuer's name when the listing is *created* -- the only
+    moment the catalog path writes ``issuer.name``; the reconciler owns it
+    afterwards. Re-seeding an existing ticker leaves its name alone.
 
     ``replace_for_exchange`` overwrites the whole (provider, exchange) slice, so
     to make this helper safe to call repeatedly for symbols on the same exchange
@@ -106,6 +111,8 @@ def _seed_listing(
         for existing in repo.list_for_provider(provider, exchange_codes=[exchange])
     }
     rows[ticker] = {"Code": ticker, "Type": "Common Stock", "Currency": currency}
+    if name is not None:
+        rows[ticker]["Name"] = name
     repo.replace_for_exchange(provider, exchange, list(rows.values()))
 
 
@@ -604,9 +611,10 @@ def test_supported_ticker_repository_replaces_rows_per_exchange(tmp_path: Path) 
     assert result.skipped_no_currency == ()
     lse = repo.list_for_provider("EODHD", exchange_codes=["LSE"])
     us = repo.list_for_provider("EODHD", exchange_codes=["US"])
-    assert [(row.symbol, row.security_name) for row in lse] == [
-        ("AAA.LSE", "AAA plc refreshed")
-    ]
+    # The restyled catalog name is not applied to the existing issuer: the
+    # refresh names an issuer only when it creates the row, and the reconciler
+    # owns ``issuer.name`` from then on.
+    assert [(row.symbol, row.security_name) for row in lse] == [("AAA.LSE", "AAA plc")]
     assert [(row.symbol, row.security_name) for row in us] == [("CCC.US", "CCC Inc")]
 
     repo.replace_for_exchange(
@@ -3062,12 +3070,11 @@ def test_security_repository_upserts_sector_and_industry_metadata(
     db_path = tmp_path / "security-metadata.db"
     repo = SecurityRepository(db_path)
     repo.initialize_schema()
-    _seed_listing(db_path, "AAA.US")
+    _seed_listing(db_path, "AAA.US", name="AAA Corp")
 
     seed_security_metadata(
         db_path,
         "AAA.US",
-        entity_name="AAA Corp",
         description="AAA description",
         sector="Technology",
         industry="Software",
@@ -3114,12 +3121,9 @@ def test_security_repository_upsert_metadata_many_updates_existing_rows(
     db_path = tmp_path / "security-metadata-batch.db"
     repo = SecurityRepository(db_path)
     repo.initialize_schema()
-    _seed_listing(db_path, "AAA.US")
-    _seed_listing(db_path, "BBB.US")
-    seed_security_metadata(db_path, "AAA.US", entity_name="AAA Corp")
-    seed_security_metadata(
-        db_path, "BBB.US", entity_name="BBB Corp", description="BBB description"
-    )
+    _seed_listing(db_path, "AAA.US", name="AAA Corp")
+    _seed_listing(db_path, "BBB.US", name="BBB Corp")
+    seed_security_metadata(db_path, "BBB.US", description="BBB description")
     aaa_id = resolve_listing_id(db_path, "AAA.US")
     bbb_id = resolve_listing_id(db_path, "BBB.US")
 
@@ -3188,12 +3192,14 @@ def test_fundamentals_repository_fetch_metadata_candidates_extracts_fields(
     security_ids = security_repo.resolve_ids_many(["AAA.US", "BBB.US", "CCC.US"])
     rows = repo.fetch_metadata_candidates(list(security_ids.values()))
 
-    assert rows[security_ids["AAA.US"]].entity_name == "AAA Holdings"
     assert rows[security_ids["AAA.US"]].description == "AAA business"
     assert rows[security_ids["AAA.US"]].sector == "Technology"
     assert rows[security_ids["AAA.US"]].industry == "Software"
-    assert rows[security_ids["BBB.US"]].entity_name == "BBB SEC Name"
-    assert rows[security_ids["BBB.US"]].sector is None
+    # SEC payloads carry only an entity name, and names are not candidate
+    # fields (the reconciler owns issuer.name): the SEC-only listing registers
+    # with nothing to promote, which the CLI reports as "no extractable
+    # metadata" rather than "no raw payload".
+    assert rows[security_ids["BBB.US"]].to_update_fields() == {}
     assert security_ids["CCC.US"] not in rows
 
 
@@ -3211,7 +3217,7 @@ def test_fetch_metadata_candidates_reads_raw_payload_not_canonical_issuer(
     db_path = tmp_path / "candidates-from-raw.db"
     repo = FundamentalsRepository(db_path)
     repo.initialize_schema()
-    _seed_listing(db_path, "AAA.US")
+    _seed_listing(db_path, "AAA.US", name="STALE Name")
     seed_raw_fundamentals(
         db_path,
         "EODHD",
@@ -3231,7 +3237,6 @@ def test_fetch_metadata_candidates_reads_raw_payload_not_canonical_issuer(
     seed_security_metadata(
         db_path,
         "AAA.US",
-        entity_name="STALE Name",
         description="Stale description",
         sector="Energy",
         industry="Oil & Gas",
@@ -3240,7 +3245,6 @@ def test_fetch_metadata_candidates_reads_raw_payload_not_canonical_issuer(
     security_id = SecurityRepository(db_path).resolve_ids_many(["AAA.US"])["AAA.US"]
     candidate = repo.fetch_metadata_candidates([security_id])[security_id]
 
-    assert candidate.entity_name == "AAA Holdings"
     assert candidate.description == "Raw description"
     assert candidate.sector == "Technology"
     assert candidate.industry == "Software"
@@ -3564,9 +3568,8 @@ def test_entity_names_by_ids_keys_by_listing_id(tmp_path: Path) -> None:
     """``entity_names_by_ids`` returns issuer names keyed by listing_id (the id the
     scope already holds), for run-screen's display labels -- no symbol/exchange read."""
     db_path = tmp_path / "entity-names.db"
-    _seed_listing(db_path, "AAA.US")
+    _seed_listing(db_path, "AAA.US", name="AAA Holdings")
     _seed_listing(db_path, "BBB.US")
-    seed_security_metadata(db_path, "AAA.US", entity_name="AAA Holdings")
 
     repo = SecurityRepository(db_path)
     ids = repo.resolve_ids_many(["AAA.US", "BBB.US"])

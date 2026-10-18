@@ -406,9 +406,14 @@ class SecurityListingStatusRecord:
 
 @dataclass(frozen=True)
 class SecurityMetadataCandidate:
-    """Canonical metadata extracted from stored raw fundamentals."""
+    """Canonical metadata extracted from stored raw fundamentals.
 
-    entity_name: Optional[str] = None
+    The entity name is deliberately absent: ``issuer.name`` is derived per legal
+    entity by the universe reconciler from every listing's evidence, not promoted
+    per listing from one payload's ``General.Name`` (a *security* name that
+    carries the share class).
+    """
+
     description: Optional[str] = None
     sector: Optional[str] = None
     industry: Optional[str] = None
@@ -417,8 +422,6 @@ class SecurityMetadataCandidate:
         """Return only metadata fields that should overwrite canonicals."""
 
         update_fields: Dict[str, str] = {}
-        if self.entity_name is not None:
-            update_fields["entity_name"] = self.entity_name
         if self.description is not None:
             update_fields["description"] = self.description
         if self.sector is not None:
@@ -430,10 +433,13 @@ class SecurityMetadataCandidate:
 
 @dataclass(frozen=True)
 class SecurityMetadataUpdate:
-    """Canonical security metadata prepared for batched persistence."""
+    """Canonical security metadata prepared for batched persistence.
+
+    Carries the gap-fill fields only; the entity name has a single owner (the
+    reconciler) and is not written through this path.
+    """
 
     security_id: int
-    entity_name: Optional[str] = None
     description: Optional[str] = None
     sector: Optional[str] = None
     industry: Optional[str] = None

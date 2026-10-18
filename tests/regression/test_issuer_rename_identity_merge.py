@@ -22,6 +22,11 @@ to ``reconcile-issuer-identity``, which works strictly from ISIN and LEI.
 These tests keep both properties pinned: the refresh still must not abort, and
 it must no longer fuse.
 
+Since 2026-10 the refresh does not write ``issuer.name`` for an existing listing
+at all. The name is derived once per legal entity by the universe reconciler, so
+a restyled catalog name is simply not a change the refresh applies -- which
+removes the last way a per-listing write could rename a shared issuer.
+
 Author: Emre Tezel
 """
 
@@ -131,6 +136,8 @@ def test_rename_no_longer_fuses_two_issuers(tmp_path: Path) -> None:
     The merge-on-collision fix traded a crash for silent fusion; with no
     identifier linking these two listings they must stay separate entities, and
     ``reconcile-issuer-identity`` is what merges when an ISIN or LEI says so.
+    The restyled name is not even applied: the refresh names an issuer only when
+    it creates the row.
     """
 
     db_path = tmp_path / "issuer-rename-no-fuse.db"
@@ -150,12 +157,17 @@ def test_rename_no_longer_fuses_two_issuers(tmp_path: Path) -> None:
         names = sorted(name for (name,) in conn.execute("SELECT name FROM issuer"))
 
     assert issuer_by_listing[us_id] != issuer_by_listing[be_id]
-    # Both rows now legitimately carry the same name.
-    assert names == ["Pearl Gold AG", "Pearl Gold AG"]
+    # The BE issuer keeps the name it was created with; renaming is the
+    # reconciler's job, not the catalog refresh's.
+    assert names == ["PEARL GOLD", "Pearl Gold AG"]
 
 
 def test_rename_never_overwrites_existing_metadata(tmp_path: Path) -> None:
-    """The COALESCE never-overwrite rule outlived the merge it was written for."""
+    """The COALESCE never-overwrite rule outlived the merge it was written for.
+
+    The refresh supplies no description, so the stored one stands -- and it no
+    longer supplies a name either, so that stands too.
+    """
 
     db_path = tmp_path / "issuer-rename-metadata.db"
     _seed_two_venue_catalog(db_path)
@@ -175,6 +187,5 @@ def test_rename_never_overwrites_existing_metadata(tmp_path: Path) -> None:
             "SELECT name, description FROM issuer WHERE description = 'kept'"
         ).fetchone()
 
-    # The payload supplied a name but no description, so the stored one stands.
-    assert renamed["name"] == "Pearl Gold AG"
+    assert renamed["name"] == "PEARL GOLD"
     assert renamed["description"] == "kept"

@@ -29,7 +29,7 @@ listings that share an ISIN or an LEI onto one row.
 | --- | --- | --- | --- | --- |
 | `issuer_id` | `INTEGER` | no | PK | issuer surrogate key |
 | `lei` | `TEXT` | yes | UNIQUE | ISO 17442 legal-entity identifier — the natural key. Added by migration 089, which ships it NULL; `reconcile-issuer-identity` derives it. Nullable because EODHD publishes an LEI for roughly a quarter of listings; the rest are identified only by the listings that point at them. CHECK enforces 20 uppercase alphanumerics |
-| `name` | `TEXT` | no |  | display name; migration 064 dropped 260 legacy orphan NULL-name rows and tightened the column to NOT NULL. The runtime ingest path falls back to the canonical_symbol when the upstream catalog doesn't supply a name. |
+| `name` | `TEXT` | no |  | the legal entity's display name. Written when `refresh-supported-tickers` creates the row (the symbol list's security name with its share-class designator stripped; the canonical symbol as a placeholder when the list has no name) and afterwards only by the universe reconciler, which names the entity after the line EODHD marks `HomeCategory: Domestic Primary`, else the classified primary, else the lowest listing id, again with the designator stripped — "Alphabet Inc", not "Alphabet Inc Class A/C". No per-listing command renames it. Migration 064 dropped 260 legacy orphan NULL-name rows and tightened the column to NOT NULL. |
 | `description` | `TEXT` | yes |  | long provider-derived description |
 | `sector` | `TEXT` | yes |  | cached business sector |
 | `industry` | `TEXT` | yes |  | cached business industry |

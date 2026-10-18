@@ -6037,9 +6037,17 @@ def test_cmd_normalize_eodhd_fundamentals_bulk_process_pool_smoke(
     ]
 
 
-def test_cmd_refresh_security_metadata_backfills_eodhd_fields_and_sec_name_fallback(
+def test_cmd_refresh_security_metadata_backfills_eodhd_fields_and_leaves_names_alone(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """Description/sector/industry are backfilled; ``issuer.name`` is not touched.
+
+    The name is the reconciler's to derive per legal entity. A per-listing
+    backfill from ``General.Name`` (or the SEC ``entityName``) used to overwrite
+    it with whichever listing ran last, which is how a shared issuer flipped
+    between its share classes. An SEC-only listing therefore has nothing
+    extractable any more.
+    """
     db_path = tmp_path / "refresh-security-metadata.db"
     store_catalog_listings(
         db_path,
@@ -6100,11 +6108,16 @@ def test_cmd_refresh_security_metadata_backfills_eodhd_fields_and_sec_name_fallb
     )
 
     assert rc == 0
+    # AAA's name came from storing its EODHD payload: ingest's reconcile pass
+    # derives ``issuer.name`` from ``General.Name`` for the whole entity. The
+    # metadata command only moved the gap-fill fields.
     assert _security_name(db_path, "AAA.US") == "AAA Holdings"
     assert _security_description(db_path, "AAA.US") == "AAA business"
     assert _security_sector(db_path, "AAA.US") == "Technology"
     assert _security_industry(db_path, "AAA.US") == "Software"
-    assert _security_name(db_path, "BBB.US") == "BBB SEC Name"
+    # BBB's SEC payload is not reconciled and its ``entityName`` is no longer
+    # promoted, so the catalog's name stands.
+    assert _security_name(db_path, "BBB.US") == "BBB Inc"
     assert _security_sector(db_path, "BBB.US") is None
     fact_count_after = (
         fact_repo._connect()
@@ -6117,9 +6130,9 @@ def test_cmd_refresh_security_metadata_backfills_eodhd_fields_and_sec_name_fallb
     assert output == [
         "Progress: 3/3 symbols complete (100.0%)",
         "Scanned 3 symbols.",
-        "Updated metadata for 2 symbols.",
+        "Updated metadata for 1 symbols.",
         "Skipped with no raw payload: 1",
-        "Skipped with no extractable metadata: 0",
+        "Skipped with no extractable metadata: 1",
         "No metadata changes needed: 0",
     ]
 
@@ -6137,8 +6150,8 @@ def test_cmd_refresh_security_metadata_backfills_eodhd_fields_and_sec_name_fallb
         "Scanned 3 symbols.",
         "Updated metadata for 0 symbols.",
         "Skipped with no raw payload: 1",
-        "Skipped with no extractable metadata: 0",
-        "No metadata changes needed: 2",
+        "Skipped with no extractable metadata: 1",
+        "No metadata changes needed: 1",
     ]
 
 
@@ -6408,8 +6421,8 @@ def test_cmd_run_screen_stage_reports_progress_for_multi_symbol_scope(
     seed_metric(db_path, "AAA.US", "working_capital", 100.0, "2023-12-31")
     security_repo = SecurityRepository(db_path)
     security_repo.initialize_schema()
-    seed_security_metadata(db_path, "AAA.US", "AAA Inc", description="AAA description")
-    seed_security_metadata(db_path, "BBB.US", "BBB Inc", description="BBB description")
+    seed_security_metadata(db_path, "AAA.US", description="AAA description")
+    seed_security_metadata(db_path, "BBB.US", description="BBB description")
 
     screen_path = tmp_path / "screen.yml"
     screen_path.write_text(
@@ -6463,8 +6476,8 @@ def test_cmd_run_screen_stage_creates_output_csv_parent_dirs_for_passing_results
     seed_metric(db_path, "BBB.US", "working_capital", 50.0, "2023-12-31")
     security_repo = SecurityRepository(db_path)
     security_repo.initialize_schema()
-    seed_security_metadata(db_path, "AAA.US", "AAA Inc", description="AAA description")
-    seed_security_metadata(db_path, "BBB.US", "BBB Inc", description="BBB description")
+    seed_security_metadata(db_path, "AAA.US", description="AAA description")
+    seed_security_metadata(db_path, "BBB.US", description="BBB description")
 
     screen_path = tmp_path / "screen.yml"
     screen_path.write_text(
@@ -6533,9 +6546,9 @@ def test_cmd_run_screen_stage_adds_ranked_output_rows_and_sorts_passers(
     seed_metric(db_path, "CCC.US", "net_debt_to_ebitda", 0.5, "2023-12-31")
     security_repo = SecurityRepository(db_path)
     security_repo.initialize_schema()
-    seed_security_metadata(db_path, "AAA.US", "AAA Inc", description="AAA description")
-    seed_security_metadata(db_path, "BBB.US", "BBB Inc", description="BBB description")
-    seed_security_metadata(db_path, "CCC.US", "CCC Inc", description="CCC description")
+    seed_security_metadata(db_path, "AAA.US", description="AAA description")
+    seed_security_metadata(db_path, "BBB.US", description="BBB description")
+    seed_security_metadata(db_path, "CCC.US", description="CCC description")
 
     screen_path = tmp_path / "ranked-screen.yml"
     screen_path.write_text(
@@ -6621,8 +6634,8 @@ def test_cmd_run_screen_stage_any_of_group_column_and_or_coverage(
     seed_metric(db_path, "BBB.US", "net_debt_to_ebitda", 1.0, "2023-12-31")
     security_repo = SecurityRepository(db_path)
     security_repo.initialize_schema()
-    seed_security_metadata(db_path, "AAA.US", "AAA Inc", description="AAA description")
-    seed_security_metadata(db_path, "BBB.US", "BBB Inc", description="BBB description")
+    seed_security_metadata(db_path, "AAA.US", description="AAA description")
+    seed_security_metadata(db_path, "BBB.US", description="BBB description")
 
     screen_path = tmp_path / "or-group-screen.yml"
     screen_path.write_text(
@@ -6796,18 +6809,13 @@ def test_cmd_run_screen_stage_limits_console_preview_and_truncates_description(
     seed_security_metadata(
         db_path,
         "AAA.US",
-        "AAA Incorporated",
         description=(
             "AAA makes precision industrial components for regulated and safety-"
             "critical end markets across aerospace, energy, and medical devices."
         ),
     )
-    seed_security_metadata(
-        db_path, "BBB.US", "BBB Incorporated", description="BBB description"
-    )
-    seed_security_metadata(
-        db_path, "CCC.US", "CCC Incorporated", description="CCC description"
-    )
+    seed_security_metadata(db_path, "BBB.US", description="BBB description")
+    seed_security_metadata(db_path, "CCC.US", description="CCC description")
 
     screen_path = tmp_path / "screen.yml"
     screen_path.write_text(

@@ -46,7 +46,6 @@ from ._common import (
     _NormalizedFactsResult,
     _extract_entity_description_from_eodhd,
     _extract_entity_industry_from_eodhd,
-    _extract_entity_name_from_eodhd,
     _extract_entity_sector_from_eodhd,
     _normalize_provider,
     _resolve_database_path,
@@ -242,7 +241,6 @@ def _normalize_eodhd_payload_worker(
         symbol=label,
         rows=rows,
         payload_hash=payload_hash,
-        entity_name=_extract_entity_name_from_eodhd(payload),
         entity_description=_extract_entity_description_from_eodhd(payload),
         entity_sector=_extract_entity_sector_from_eodhd(payload),
         entity_industry=_extract_entity_industry_from_eodhd(payload),
@@ -265,17 +263,15 @@ def _persist_normalization_result(
     old symbol path there is no "uncatalogued, skip the writes" branch.
     """
 
-    if (
-        result.entity_name
-        or result.entity_description
-        or result.entity_sector
-        or result.entity_industry
-    ):
+    # The entity name is not promoted from here: ingest's reconcile pass already
+    # derived ``issuer.name`` for this listing's whole entity from the same
+    # payload, and a per-listing rewrite would flip a shared issuer between its
+    # share classes on every run.
+    if result.entity_description or result.entity_sector or result.entity_industry:
         security_repo.upsert_metadata_many(
             [
                 SecurityMetadataUpdate(
                     security_id=unit.listing_id,
-                    entity_name=result.entity_name,
                     description=result.entity_description,
                     sector=result.entity_sector,
                     industry=result.entity_industry,

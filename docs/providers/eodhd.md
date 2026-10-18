@@ -335,6 +335,23 @@ Both derived values are produced together because they are not independent:
 grouping names a merged issuer after its *primary* listing, so classifying
 without regrouping would leave issuer names stale.
 
+**How a merged issuer is named.** `General.Name` is a *security* name — it
+carries the share class ("Alphabet Inc Class A" / "Alphabet Inc Class C") — and
+both US classes self-declare `PrimaryTicker`, so classification alone cannot say
+which line is the company. The grouper therefore picks the listing in three
+tiers: the line EODHD marks `HomeCategory: Domestic Primary` (GOOGL over GOOG,
+BRK-B over BRK-A, BAC over its preferred series, which are `Domestic Preferred`),
+else the classified primary, else the lowest listing id. It then strips a
+trailing share-class designator (`Class A`, `Cl A`, `Series A`, `Srs A`,
+optionally followed by `Common Stock` / `Ordinary Shares`) from that name, so
+Alphabet's issuer is "Alphabet Inc" rather than the name of whichever class
+sorted first. Bare letters ("Under Armour Inc A") and mid-name designators are
+left alone. The reconciler is the **only** writer of `issuer.name` after the row
+is created; `normalize-fundamentals`, `refresh-security-metadata` and
+`refresh-supported-tickers` fill other metadata gaps but never rename, because
+each used to overwrite a shared issuer with the security name of whichever
+listing it processed last. The rule lives in `pyvalue.universe.issuer_identity`.
+
 The reach-back is cheap because the neighbourhood is small — measured at **0.12s
 per 25-payload batch** on the live catalog, or roughly 6 minutes spread across a
 full bootstrap's ~2,900 batches. Groups average 1.44 listings per ISIN and 74%

@@ -337,7 +337,6 @@ def seed_facts(
 def seed_security_metadata(
     db_path: Path,
     symbol: str,
-    entity_name: Optional[str] = None,
     description: Optional[str] = None,
     sector: Optional[str] = None,
     industry: Optional[str] = None,
@@ -346,6 +345,9 @@ def seed_security_metadata(
 
     Resolves ``symbol`` to its ``listing_id`` and persists through the id-keyed
     :meth:`SecurityRepository.upsert_metadata_many` (the only metadata writer).
+    The entity name is not among the fields: ``issuer.name`` is set when the
+    listing is catalogued and owned by the reconciler afterwards, so a test that
+    needs a particular name gives it to the catalog row (``Name``) instead.
     """
     # Imported lazily so the src/ path insert above has already run.
     from pyvalue.persistence.storage import SecurityMetadataUpdate, SecurityRepository
@@ -355,7 +357,6 @@ def seed_security_metadata(
         [
             SecurityMetadataUpdate(
                 security_id=listing_id,
-                entity_name=entity_name,
                 description=description,
                 sector=sector,
                 industry=industry,
