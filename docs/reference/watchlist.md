@@ -20,7 +20,7 @@ when the set changes.
 | Canonical symbol | listing_id | Issuer | Exchange | Currency |
 |---|---|---|---|---|
 | MSFT.US | 65235 | Microsoft Corporation | US | USD |
-| GOOGL.US | 61081 | Alphabet Inc Class A | US | USD |
+| GOOGL.US | 61081 | Alphabet Inc | US | USD |
 | ADBE.US | 53407 | Adobe Systems Incorporated | US | USD |
 | NVDA.US | 66246 | NVIDIA Corporation | US | USD |
 | AMD.US | 54072 | Advanced Micro Devices Inc | US | USD |
