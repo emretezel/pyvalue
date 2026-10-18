@@ -307,17 +307,16 @@ class UniverseReconciler:
         statuses_changed = self._status_repo.upsert_many(records, connection=conn)
 
         # Identity reads the statuses back, so it must follow the write above.
-        # The names and vendor home categories come from the read above, so
-        # grouping never re-opens a payload just to fetch either. The category
-        # is what lets the grouper name a multi-class company after the line the
-        # vendor marks primary instead of whichever class sorts first.
-        home_categories = {
-            item.listing_id: item.home_category
-            for item in evidence
-            if item.home_category is not None
-        }
+        # The names and the vendor evidence come from the read above, so
+        # grouping never re-opens a payload just to fetch them. The evidence
+        # (home category, provider symbol, PrimaryTicker) is what lets the
+        # grouper name a company after the line the vendor marks primary, or
+        # the line its other listings defer to, instead of whichever sorts first.
         identities = self._issuer_repo.load_identities(
-            conn, neighbourhood, batch.payload_names, home_categories
+            conn,
+            neighbourhood,
+            batch.payload_names,
+            {item.listing_id: item for item in evidence},
         )
         groups = group_listings(identities)
         applied = self._issuer_repo.apply_groups(conn, groups, vacated)

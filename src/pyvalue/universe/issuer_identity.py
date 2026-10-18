@@ -64,13 +64,16 @@ Class A" / "Alphabet Inc Class C"), so no listing's name is the company's name
 as such. The issuer row models the legal entity, so the group's name is derived
 in two steps, both pure and both pinned by tests:
 
-1. Choose the listing whose name describes the company best. The vendor says
-   which line that is: ``HomeCategory`` reads ``Domestic Primary`` on the main
-   share line and ``Domestic Secondary`` / ``Domestic Preferred`` on the others
-   (GOOGL over GOOG, BRK-B over BRK-A, BAC over its seventeen preferred series).
-   Classification cannot make that call, because both share classes self-declare
-   ``PrimaryTicker`` and are *both* primary. Where the vendor is silent the
-   classification-primary line wins, then the lowest listing id.
+1. Choose the listing whose name describes the company best, by tiers of vendor
+   evidence (see :func:`_group_name`): the line EODHD tags ``Domestic Primary``
+   (GOOGL over GOOG, BRK-B over BRK-A, BAC over its seventeen preferred series);
+   then the line the group's *other* listings name as their ``PrimaryTicker``
+   (twelve of Apple's lines point at ``AAPL.US``; its Frankfurt CDR points at
+   itself); then classification; then the vendor's ``Domestic`` tag; then the
+   lowest listing id. Classification alone cannot make the first call, because
+   both share classes self-declare ``PrimaryTicker`` and are *both* primary --
+   and a depositary receipt self-declares too, which is how the second tier
+   earns its place.
 2. Strip the trailing share-class designator from that name
    (:func:`entity_name_from_security_name`), so Alphabet is "Alphabet Inc" and not
    the name of whichever class happened to sort first.
@@ -85,15 +88,47 @@ how Bank of America's row came to be called after a Merrill Lynch preferred.
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass
-from typing import Dict, Final, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import (
+    Dict,
+    Final,
+    FrozenSet,
+    Iterable,
+    List,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+)
+
+from pyvalue.universe.listing_classification import ListingStatus
 
 # EODHD's ``General.HomeCategory`` value marking the line the vendor itself
 # treats as the company's primary share class. Stored uppercased, matching how
-# ``ListingEvidence.home_category`` normalizes the field. Only this one value is
-# read here: ``Domestic Secondary`` and ``Domestic Preferred`` say "not this one"
-# by not being it, and the depositary values belong to the classifier.
+# ``ListingEvidence.home_category`` normalizes the field. ``Domestic Secondary``
+# and ``Domestic Preferred`` say "not this one" by not being it, and the
+# depositary values belong to the classifier.
 VENDOR_PRIMARY_LINE: Final[str] = "DOMESTIC PRIMARY"
+
+# The ``HomeCategory`` values that mark a home-market *share* line (as opposed to
+# a preferred series, a receipt, or a foreign venue, where the field is empty).
+# Read only as a late tie-break: a US company whose only other line is a
+# self-declaring Frankfurt CDR has no peer pointing at either, and this is what
+# still separates "Apple Inc." from "APPLE INC. CDR".
+VENDOR_DOMESTIC_LINES: Final[FrozenSet[str]] = frozenset(
+    {"DOMESTIC", "DOMESTIC PRIMARY", "DOMESTIC SECONDARY"}
+)
+
+# Classification rank for the naming tie-break only. ``unknown`` means "no
+# evidence either way" and must outrank ``secondary``, which is positive
+# evidence that the line is *not* the company -- otherwise JOYY's lone US
+# receipt (unknown) loses to its German quote lines (secondary, lower ids).
+_STATUS_RANK: Final[Dict[ListingStatus, int]] = {
+    ListingStatus.PRIMARY: 0,
+    ListingStatus.UNKNOWN: 1,
+    ListingStatus.SECONDARY: 2,
+}
 
 # A trailing share-class designator on a vendor security name. Anchored at the
 # end and matched case-insensitively: an optional separator, one of the
@@ -156,13 +191,18 @@ class ListingIdentity:
         entity_name: This listing's security name (``General.Name`` when the
             payload has one, else the issuer name currently stored), one of the
             candidates for naming the merged group.
-        is_primary: Whether the listing is classified ``primary``. Only a
-            tie-break for which name the merged issuer keeps -- a company is
-            best described by the name on its primary line.
+        status: The stored classification (``listing.primary_listing_status``).
+            Only a tie-break for which name the merged issuer keeps -- a company
+            is best described by the name on its primary line.
         home_category: ``General.HomeCategory``, uppercased, or None. Read for
-            one value only, :data:`VENDOR_PRIMARY_LINE`, which outranks
-            ``is_primary`` when choosing the name: two share classes are both
-            primary, and only the vendor says which one is the company.
+            :data:`VENDOR_PRIMARY_LINE` (outranks everything: two share classes
+            are both primary, and only the vendor says which one is the company)
+            and, as a late tie-break, :data:`VENDOR_DOMESTIC_LINES`.
+        provider_symbol: The qualified provider symbol (``AAPL.US``), the form
+            in which other listings' ``PrimaryTicker`` fields name this one.
+        primary_ticker: ``General.PrimaryTicker``, qualified and uppercased, or
+            None. Together with ``provider_symbol`` it gives the second naming
+            tier: the line the group's other listings defer to.
     """
 
     listing_id: int
@@ -170,8 +210,10 @@ class ListingIdentity:
     isin: Optional[str] = None
     lei: Optional[str] = None
     entity_name: Optional[str] = None
-    is_primary: bool = False
+    status: ListingStatus = ListingStatus.UNKNOWN
     home_category: Optional[str] = None
+    provider_symbol: Optional[str] = None
+    primary_ticker: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -335,19 +377,50 @@ def group_listings(
     return groups
 
 
+def _peer_deference(members: Sequence[ListingIdentity]) -> Dict[int, int]:
+    """Count, per listing, how many *other* members name it as ``PrimaryTicker``.
+
+    This is the vendor's own cross-reference: twelve of Apple's fourteen lines
+    publish ``PrimaryTicker: AAPL.US``, while its Frankfurt CDR ``APC8.F``
+    publishes itself. A receipt or a quote-venue line is never pointed at by
+    anything but itself, so the self-reference is excluded -- otherwise every
+    self-declaring line would score one and the tier would say nothing.
+    """
+
+    pointed_at: Counter[str] = Counter(
+        member.primary_ticker for member in members if member.primary_ticker
+    )
+    deference: Dict[int, int] = {}
+    for member in members:
+        count = pointed_at[member.provider_symbol] if member.provider_symbol else 0
+        if member.primary_ticker and member.primary_ticker == member.provider_symbol:
+            count -= 1
+        deference[member.listing_id] = count
+    return deference
+
+
 def _group_name(members: Sequence[ListingIdentity]) -> Optional[str]:
     """Choose the name a merged issuer keeps.
 
-    Three tiers, each a tie-break for the one above:
+    Five tiers, each a tie-break for the one above, every one of them read off
+    vendor fields rather than venue identity:
 
     1. The line the vendor marks ``Domestic Primary``. Share classes are all
        classified primary (each self-declares ``PrimaryTicker``), so without this
        Alphabet was named after whichever of GOOG/GOOGL had the lower listing
        id -- "Alphabet Inc Class C" -- and Bank of America after a preferred.
-    2. A classification-primary line: a company is best described by the line
-       that actually is the company, not by an ADR's ``... PLC ADR`` or a German
-       regional line's abbreviated ``NEMETSCHEK SE O.N.``.
-    3. The lowest listing id, so the choice is deterministic across runs.
+    2. The line most of the group's other listings name as their
+       ``PrimaryTicker`` (:func:`_peer_deference`). A depositary receipt
+       self-declares primary exactly like the real line does, and on the live
+       catalog 223 companies -- Apple, Amazon, Capgemini, Mercedes-Benz --
+       were briefly named after a Frankfurt receipt with a lower listing id.
+       The receipt is pointed at by nobody; the home line by everyone else.
+    3. Classification, ranked primary, then unknown, then secondary: a line
+       the rules positively demoted should not out-name one they could not
+       decide.
+    4. A home-market share line by the vendor's ``Domestic`` family of tags,
+       for the two-line case the peers cannot settle.
+    5. The lowest listing id, so the choice is deterministic across runs.
 
     The chosen *security* name is then reduced to the entity's name by
     :func:`entity_name_from_security_name`, which is also why two classes that
@@ -358,11 +431,14 @@ def _group_name(members: Sequence[ListingIdentity]) -> Optional[str]:
     named = [member for member in members if member.entity_name]
     if not named:
         return None
+    deference = _peer_deference(members)
     best = min(
         named,
         key=lambda member: (
             member.home_category != VENDOR_PRIMARY_LINE,
-            not member.is_primary,
+            -deference[member.listing_id],
+            _STATUS_RANK[member.status],
+            member.home_category not in VENDOR_DOMESTIC_LINES,
             member.listing_id,
         ),
     )
@@ -374,6 +450,7 @@ def _group_name(members: Sequence[ListingIdentity]) -> Optional[str]:
 
 
 __all__ = [
+    "VENDOR_DOMESTIC_LINES",
     "VENDOR_PRIMARY_LINE",
     "IssuerGroup",
     "ListingIdentity",

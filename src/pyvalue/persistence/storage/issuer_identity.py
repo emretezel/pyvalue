@@ -19,6 +19,7 @@ from pyvalue.universe.issuer_identity import (
     IssuerGroup,
     ListingIdentity,
 )
+from pyvalue.universe.listing_classification import ListingEvidence, ListingStatus
 
 from .base import SQLiteStore, _batched
 from .migrations import apply_migrations
@@ -52,7 +53,7 @@ class IssuerIdentityRepository(SQLiteStore):
         conn: sqlite3.Connection,
         listing_ids: Optional[Iterable[int]] = None,
         payload_names: Optional[Mapping[int, str]] = None,
-        home_categories: Optional[Mapping[int, str]] = None,
+        vendor_evidence: Optional[Mapping[int, ListingEvidence]] = None,
     ) -> List[ListingIdentity]:
         """Read entity evidence for ``listing_ids`` (all listings when None).
 
@@ -95,11 +96,11 @@ class IssuerIdentityRepository(SQLiteStore):
         and a current issuer and must be grouped, not dropped -- ~4,400 catalog
         holdovers are in exactly that state.
 
-        ``home_categories`` rides along for the same reason as the names: the
-        grouper names a multi-class company after the line the vendor marks
-        ``Domestic Primary``, and the classification read has already extracted
-        ``General.HomeCategory`` for every listing in the neighbourhood. A listing
-        absent from the mapping simply carries no category.
+        ``vendor_evidence`` rides along for the same reason as the names: the
+        grouper's naming tiers read ``HomeCategory``, the qualified provider
+        symbol and ``PrimaryTicker``, and the classification read has already
+        extracted all three for every listing in the neighbourhood. A listing
+        absent from the mapping simply carries none of them.
         """
 
         select = """
@@ -134,19 +135,25 @@ class IssuerIdentityRepository(SQLiteStore):
                     ).fetchall()
                 )
         names: Mapping[int, str] = payload_names or {}
-        categories: Mapping[int, str] = home_categories or {}
-        return [
-            ListingIdentity(
-                listing_id=int(row["listing_id"]),
-                issuer_id=int(row["issuer_id"]),
-                isin=shaped_isin(row["isin"]),
-                lei=shaped_lei(row["lei"]),
-                entity_name=names.get(int(row["listing_id"]), row["stored_name"]),
-                is_primary=str(row["status"]) == "primary",
-                home_category=categories.get(int(row["listing_id"])),
+        evidence: Mapping[int, ListingEvidence] = vendor_evidence or {}
+        identities: List[ListingIdentity] = []
+        for row in rows:
+            listing_id = int(row["listing_id"])
+            vendor = evidence.get(listing_id)
+            identities.append(
+                ListingIdentity(
+                    listing_id=listing_id,
+                    issuer_id=int(row["issuer_id"]),
+                    isin=shaped_isin(row["isin"]),
+                    lei=shaped_lei(row["lei"]),
+                    entity_name=names.get(listing_id, row["stored_name"]),
+                    status=ListingStatus(str(row["status"])),
+                    home_category=vendor.home_category if vendor else None,
+                    provider_symbol=vendor.provider_symbol if vendor else None,
+                    primary_ticker=vendor.primary_ticker if vendor else None,
+                )
             )
-            for row in rows
-        ]
+        return identities
 
     @staticmethod
     def _issuer_count(conn: sqlite3.Connection) -> int:

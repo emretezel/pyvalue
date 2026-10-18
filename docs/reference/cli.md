@@ -166,10 +166,13 @@ Notes:
   bulk; it repoints listings onto the group's lowest `issuer_id` and deletes the
   emptied rows, all in one transaction
 - the only writer of `issuer.name` once a row exists: the group is named after
-  the line EODHD marks `HomeCategory: Domestic Primary`, else the classified
-  primary, else the lowest listing id, with the trailing share-class designator
-  stripped — "Alphabet Inc", not "Alphabet Inc Class C". The per-listing
-  metadata commands never rename (see `docs/providers/eodhd.md`)
+  the line EODHD marks `HomeCategory: Domestic Primary`, else the line the
+  group's other listings name as their `PrimaryTicker`, else the classified
+  primary (unknown before secondary), else a `Domestic`-tagged line, else the
+  lowest listing id, with the trailing share-class designator stripped —
+  "Alphabet Inc", not "Alphabet Inc Class C"; "Apple Inc.", not its Frankfurt
+  receipt's "APPLE INC. CDR". The per-listing metadata commands never rename
+  (see `docs/providers/eodhd.md`)
 - safe to repeat: a catalog already matching the derived shape issues no writes
 - it does **not** link a depositary receipt to its underlying — they are
   different securities with different ISINs and receipts rarely carry an LEI

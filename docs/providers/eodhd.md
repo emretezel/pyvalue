@@ -338,11 +338,15 @@ without regrouping would leave issuer names stale.
 **How a merged issuer is named.** `General.Name` is a *security* name — it
 carries the share class ("Alphabet Inc Class A" / "Alphabet Inc Class C") — and
 both US classes self-declare `PrimaryTicker`, so classification alone cannot say
-which line is the company. The grouper therefore picks the listing in three
-tiers: the line EODHD marks `HomeCategory: Domestic Primary` (GOOGL over GOOG,
-BRK-B over BRK-A, BAC over its preferred series, which are `Domestic Preferred`),
-else the classified primary, else the lowest listing id. It then strips a
-trailing share-class designator (`Class A`, `Cl A`, `Series A`, `Srs A`,
+which line is the company — and a depositary receipt self-declares exactly the
+same way. The grouper therefore picks the listing in five tiers of vendor
+evidence: the line EODHD marks `HomeCategory: Domestic Primary` (GOOGL over
+GOOG, BRK-B over BRK-A, BAC over its preferred series, which are `Domestic
+Preferred`); else the line most of the group's *other* listings name as their
+`PrimaryTicker` (twelve of Apple's lines point at `AAPL.US`, nothing points at
+its Frankfurt CDR `APC8.F`); else classification ranked primary, unknown,
+secondary; else a home-market share line by the `Domestic` family of tags; else
+the lowest listing id. It then strips a trailing share-class designator (`Class A`, `Cl A`, `Series A`, `Srs A`,
 optionally followed by `Common Stock` / `Ordinary Shares`) from that name, so
 Alphabet's issuer is "Alphabet Inc" rather than the name of whichever class
 sorted first. Bare letters ("Under Armour Inc A") and mid-name designators are

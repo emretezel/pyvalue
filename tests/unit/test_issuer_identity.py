@@ -18,6 +18,7 @@ from pyvalue.universe.issuer_identity import (
     entity_name_from_security_name,
     group_listings,
 )
+from pyvalue.universe.listing_classification import ListingStatus
 
 
 def _identity(
@@ -27,8 +28,10 @@ def _identity(
     isin: Optional[str] = None,
     lei: Optional[str] = None,
     entity_name: Optional[str] = None,
-    is_primary: bool = False,
+    status: ListingStatus = ListingStatus.UNKNOWN,
     home_category: Optional[str] = None,
+    provider_symbol: Optional[str] = None,
+    primary_ticker: Optional[str] = None,
 ) -> ListingIdentity:
     return ListingIdentity(
         listing_id=listing_id,
@@ -36,8 +39,10 @@ def _identity(
         isin=isin,
         lei=lei,
         entity_name=entity_name,
-        is_primary=is_primary,
+        status=status,
         home_category=home_category,
+        provider_symbol=provider_symbol,
+        primary_ticker=primary_ticker,
     )
 
 
@@ -164,7 +169,7 @@ def test_group_takes_the_primary_listings_name() -> None:
                 20,
                 lei=lei,
                 entity_name="Mettler-Toledo International Inc.",
-                is_primary=True,
+                status=ListingStatus.PRIMARY,
             ),
         ]
     )
@@ -202,7 +207,7 @@ def test_vendor_primary_line_outranks_the_lowest_id_primary() -> None:
                 10,
                 lei=lei,
                 entity_name="Molson Coors Beverage Company",
-                is_primary=True,
+                status=ListingStatus.PRIMARY,
                 home_category="DOMESTIC SECONDARY",
             ),
             _identity(
@@ -210,7 +215,7 @@ def test_vendor_primary_line_outranks_the_lowest_id_primary() -> None:
                 20,
                 lei=lei,
                 entity_name="Molson Coors Brewing Co Class B",
-                is_primary=True,
+                status=ListingStatus.PRIMARY,
                 home_category=VENDOR_PRIMARY_LINE,
             ),
         ]
@@ -236,7 +241,7 @@ def test_vendor_primary_line_outranks_a_preferred_series() -> None:
                 entity_name=(
                     "Bank of America Corporation Non Cumulative Perpetual Conv Pfd Ser L"
                 ),
-                is_primary=True,
+                status=ListingStatus.PRIMARY,
                 home_category="DOMESTIC PREFERRED",
             ),
             _identity(
@@ -244,7 +249,7 @@ def test_vendor_primary_line_outranks_a_preferred_series() -> None:
                 20,
                 lei=lei,
                 entity_name="Bank of America Corp",
-                is_primary=True,
+                status=ListingStatus.PRIMARY,
                 home_category=VENDOR_PRIMARY_LINE,
             ),
             _identity(
@@ -252,7 +257,7 @@ def test_vendor_primary_line_outranks_a_preferred_series() -> None:
                 30,
                 lei=lei,
                 entity_name="Merrill Lynch Capital Trust I GTD CAP 6.45%",
-                is_primary=True,
+                status=ListingStatus.PRIMARY,
                 home_category="DOMESTIC PREFERRED",
             ),
         ]
@@ -271,19 +276,134 @@ def test_vendor_primary_line_outranks_classification() -> None:
     lei = "5493000BD5GJNUDIUG10"
     groups = group_listings(
         [
-            _identity(1, 10, lei=lei, entity_name="Acme Holdings ADR", is_primary=True),
+            _identity(
+                1,
+                10,
+                lei=lei,
+                entity_name="Acme Holdings ADR",
+                status=ListingStatus.PRIMARY,
+            ),
             _identity(
                 2,
                 20,
                 lei=lei,
                 entity_name="Acme Holdings Inc Class A",
-                is_primary=False,
+                status=ListingStatus.SECONDARY,
                 home_category=VENDOR_PRIMARY_LINE,
             ),
         ]
     )
 
     assert groups[0].name == "Acme Holdings Inc"
+
+
+def test_peers_primary_ticker_outranks_a_self_declared_receipt() -> None:
+    """Apple: the Frankfurt CDR self-declares primary and has the lower id.
+
+    Twelve of Apple's lines publish ``PrimaryTicker: AAPL.US``; ``APC8.F``
+    publishes itself and nothing points at it. The old rule named the company
+    "APPLE INC. CDR" the moment the per-listing writers stopped masking it.
+    """
+
+    lei = "HWUPKR0MPOU8FGXBT394"
+    groups = group_listings(
+        [
+            _identity(
+                1,
+                10,
+                lei=lei,
+                entity_name="APPLE INC. CDR",
+                status=ListingStatus.PRIMARY,
+                provider_symbol="APC8.F",
+                primary_ticker="APC8.F",
+            ),
+            _identity(
+                2,
+                20,
+                lei=lei,
+                entity_name="Apple Inc",
+                status=ListingStatus.SECONDARY,
+                provider_symbol="APC.F",
+                primary_ticker="AAPL.US",
+            ),
+            _identity(
+                3,
+                30,
+                lei=lei,
+                entity_name="Apple Inc.",
+                status=ListingStatus.PRIMARY,
+                home_category="DOMESTIC",
+                provider_symbol="AAPL.US",
+                primary_ticker="AAPL.US",
+            ),
+        ]
+    )
+
+    assert groups[0].name == "Apple Inc."
+
+
+def test_unknown_classification_outranks_secondary_for_naming() -> None:
+    """JOYY: only receipts are listed; the US line is unknown, the German quote
+    lines are positively secondary and point at a ticker outside the group."""
+
+    lei = "254900E8VV9OAJK2PK62"
+    groups = group_listings(
+        [
+            _identity(
+                1,
+                10,
+                lei=lei,
+                entity_name="JOYY INC.SP.ADR/20 CL.A",
+                status=ListingStatus.SECONDARY,
+                provider_symbol="0YYA.DU",
+                primary_ticker="YY.US",
+            ),
+            _identity(
+                2,
+                20,
+                lei=lei,
+                entity_name="JOYY Inc",
+                status=ListingStatus.UNKNOWN,
+                home_category="ADR",
+                provider_symbol="JOYY.US",
+                primary_ticker="JOYY.US",
+            ),
+        ]
+    )
+
+    assert groups[0].name == "JOYY Inc"
+
+
+def test_domestic_tag_settles_a_two_line_tie() -> None:
+    """A US line and a self-declaring Frankfurt CDR, nobody pointing at either:
+    the vendor's ``Domestic`` tag is the only thing left that says which is home."""
+
+    lei = "5493000BD5GJNUDIUG10"
+    groups = group_listings(
+        [
+            _identity(
+                1,
+                10,
+                lei=lei,
+                entity_name="ACME CORP. CDR",
+                status=ListingStatus.PRIMARY,
+                provider_symbol="ACM8.F",
+                primary_ticker="ACM8.F",
+            ),
+            _identity(
+                2,
+                20,
+                lei=lei,
+                entity_name="Acme Corp",
+                status=ListingStatus.PRIMARY,
+                home_category="DOMESTIC",
+                provider_symbol="ACME.US",
+                primary_ticker="ACME.US",
+            ),
+        ]
+    )
+
+    assert groups[0].name == "Acme Corp"
 
 
 def test_share_classes_that_tie_on_every_tier_still_agree_on_a_name() -> None:
@@ -299,7 +419,7 @@ def test_share_classes_that_tie_on_every_tier_still_agree_on_a_name() -> None:
                 isin="US02079K1079",
                 lei=lei,
                 entity_name="Alphabet Inc Class C",
-                is_primary=True,
+                status=ListingStatus.PRIMARY,
             ),
             _identity(
                 2,
@@ -307,7 +427,7 @@ def test_share_classes_that_tie_on_every_tier_still_agree_on_a_name() -> None:
                 isin="US02079K3059",
                 lei=lei,
                 entity_name="Alphabet Inc Class A",
-                is_primary=True,
+                status=ListingStatus.PRIMARY,
             ),
         ]
     )
@@ -465,7 +585,7 @@ def test_receipt_publishing_its_issuers_lei_is_grouped_with_the_underlying() -> 
                 isin="GB00B1CKQ739",
                 lei=lei,
                 entity_name="Dunelm Group PLC",
-                is_primary=True,
+                status=ListingStatus.PRIMARY,
             ),
             # Different security, different ISIN -- but the issuer's LEI.
             _identity(
